@@ -1,0 +1,42 @@
+name: Live evals
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-evals-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  support-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: evals
+    env:
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.11
+      - run: uv sync --locked
+      - id: eval
+        continue-on-error: true
+        run: >-
+          uv run multiturn-evals run scenarios/support.yaml
+          --target targets/support.yaml
+          --out outputs/support
+          --max-concurrency 1
+          --no-progress
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: support-eval-${{ github.run_id }}
+          path: outputs/support
+          if-no-files-found: error
+      - if: steps.eval.outcome == 'failure'
+        run: exit 1

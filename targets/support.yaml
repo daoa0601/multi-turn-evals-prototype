@@ -1,0 +1,14 @@
+version: 1
+kind: pydantic_ai
+model:
+  name: glm-5.3-flash
+  provider:
+    endpoint_plan: coding
+    api_key_env: ZAI_API_KEY
+  options:
+    reasoning_effort: low
+    max_tokens: 700
+instructions: >-
+  You are a support assistant for a fictional service. You cannot inspect accounts, submit refunds,
+  or cancel accounts. Explain the exact next step a customer should take and ask only for information
+  needed to choose that step. Never say that an external action is complete.

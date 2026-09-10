@@ -1,0 +1,66 @@
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "pydantic-multiturn-evals"
+version = "0.1.0"
+description = "Adaptive multi-turn evaluations built on Pydantic Evals"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.12,<3",
+  "pydantic-ai-slim[openai]==2.42.0",
+  "pydantic-evals==2.42.0",
+  "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+tracing = ["langfuse>=4.10,<5"]
+
+[dependency-groups]
+dev = [
+  "basedpyright>=1.31,<2",
+  "pytest>=8.4,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.13,<1",
+]
+
+[project.scripts]
+multiturn-evals = "pydantic_multiturn_evals.cli:main"
+
+[tool.uv.build-backend]
+module-name = "pydantic_multiturn_evals"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "N", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pydantic_multiturn_evals"]
+
+[tool.basedpyright]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+
+[tool.coverage.run]
+branch = true
+source = ["pydantic_multiturn_evals"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85

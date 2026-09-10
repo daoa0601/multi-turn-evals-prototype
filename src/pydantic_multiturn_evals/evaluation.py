@@ -1,0 +1,301 @@
+"""Compile scenarios into Pydantic cases and derive the CI gate."""
+
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import dataclass, replace
+from pathlib import Path
+from statistics import fmean
+from typing import Any
+
+from pydantic import BaseModel
+from pydantic_ai import ModelSettings
+from pydantic_ai.models import Model
+from pydantic_evals import Case, Dataset
+from pydantic_evals.evaluators import (
+    Evaluator,
+    EvaluatorContext,
+    EvaluatorOutput,
+    LLMJudge,
+)
+from pydantic_evals.reporting import EvaluationReport
+
+from pydantic_multiturn_evals.models import (
+    CaseGate,
+    GatePolicy,
+    GateResult,
+    Scenario,
+    ScenarioResult,
+    SuiteSpec,
+)
+from pydantic_multiturn_evals.providers import PydanticActor, build_model, model_settings
+from pydantic_multiturn_evals.runner import (
+    AdaptiveActor,
+    ChatTarget,
+    RunnerServices,
+    run_scenario,
+)
+from pydantic_multiturn_evals.spec import load_suite
+from pydantic_multiturn_evals.storage import InMemoryStateStore, StateStore
+
+
+@dataclass
+class TranscriptJudge(Evaluator[Scenario, ScenarioResult, None]):
+    """Run Pydantic's LLMJudge against visible exchanges only."""
+
+    rubric: str
+    model: Model
+    settings: ModelSettings
+
+    async def evaluate(
+        self,
+        ctx: EvaluatorContext[Scenario, ScenarioResult, None],
+    ) -> EvaluatorOutput:
+        judge = LLMJudge(
+            rubric=self.rubric,
+            model=self.model,
+            model_settings=self.settings,
+            score={"evaluation_name": "judge_score", "include_reason": True},
+            assertion={"evaluation_name": "judge_pass", "include_reason": True},
+        )
+        judge_context = replace(
+            ctx,
+            expected_output=None,
+            output=ctx.output.transcript,
+        )
+        return await judge.evaluate(judge_context)
+
+
+def build_dataset(
+    suite: SuiteSpec,
+    *,
+    judge_model: Model,
+) -> Dataset[Scenario, ScenarioResult, None]:
+    settings = model_settings(suite.judge.model)
+    cases = [
+        Case[Scenario, ScenarioResult, None](
+            name=scenario.id,
+            inputs=scenario,
+            evaluators=(
+                TranscriptJudge(
+                    rubric=scenario.judge_rubric,
+                    model=judge_model,
+                    settings=settings,
+                ),
+            ),
+        )
+        for scenario in suite.scenarios
+    ]
+    return Dataset(name=suite.name, cases=cases)
+
+
+@dataclass(frozen=True, slots=True)
+class SuiteResult:
+    report: EvaluationReport[Scenario, ScenarioResult, None]
+    gate: GateResult
+
+    def write_artifacts(self, directory: str | Path) -> None:
+        output_directory = Path(directory)
+        output_directory.mkdir(parents=True, exist_ok=True)
+        _write_text(output_directory / "gate.json", self.gate.model_dump_json(indent=2) + "\n")
+        _write_text(
+            output_directory / "report.json",
+            json.dumps(_report_payload(self.report), ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+        )
+        _write_text(
+            output_directory / "report.txt",
+            self.report.render(include_output=False, include_reasons=True),
+        )
+        transcript_lines = [case.output.model_dump_json() for case in self.report.cases]
+        transcript_text = "\n".join(transcript_lines)
+        _write_text(
+            output_directory / "transcripts.jsonl",
+            transcript_text + ("\n" if transcript_text else ""),
+        )
+
+
+async def evaluate_suite(
+    source: str | Path | SuiteSpec,
+    *,
+    target: ChatTarget,
+    actor: AdaptiveActor | None = None,
+    judge_model: Model | None = None,
+    state_store: StateStore | None = None,
+    max_concurrency: int = 1,
+    repeat: int = 1,
+    progress: bool = True,
+) -> SuiteResult:
+    """Load, run, judge, aggregate, and gate one adaptive scenario suite."""
+
+    suite = source if isinstance(source, SuiteSpec) else load_suite(source)
+    adaptive_actor = actor or PydanticActor(suite.actor)
+    evaluator_model = judge_model or build_model(suite.judge.model)
+    services = RunnerServices(state_store=state_store or InMemoryStateStore())
+    dataset = build_dataset(suite, judge_model=evaluator_model)
+
+    async def task(scenario: Scenario) -> ScenarioResult:
+        return await run_scenario(
+            scenario,
+            limits=suite.limits_for(scenario),
+            target=target,
+            actor=adaptive_actor,
+            services=services,
+        )
+
+    report = await dataset.evaluate(
+        task,
+        name=suite.name,
+        task_name="adaptive_conversation",
+        max_concurrency=max_concurrency,
+        repeat=repeat,
+        progress=progress,
+        metadata={"suite": suite.name, "schema_version": suite.version},
+    )
+    return SuiteResult(report=report, gate=derive_gate(report, suite.gate))
+
+
+def derive_gate(
+    report: EvaluationReport[Scenario, ScenarioResult, None],
+    policy: GatePolicy,
+) -> GateResult:
+    outcomes: list[CaseGate] = []
+    scores: list[float] = []
+
+    for case in report.cases:
+        errors = tuple(
+            f"{failure.name}: {failure.error_message}" for failure in case.evaluator_failures
+        )
+        score_result = case.scores.get("judge_score")
+        assertion_result = case.assertions.get("judge_pass")
+        score = float(score_result.value) if score_result is not None else None
+        assertion = bool(assertion_result.value) if assertion_result is not None else None
+        validation_errors = list(errors)
+        if score is None or not math.isfinite(score):
+            validation_errors.append("judge_score is missing or not finite")
+            score = None
+        else:
+            scores.append(score)
+        if assertion is None:
+            validation_errors.append("judge_pass is missing")
+        reason = None
+        if assertion_result is not None:
+            reason = assertion_result.reason
+        elif score_result is not None:
+            reason = score_result.reason
+        outcomes.append(
+            CaseGate(
+                scenario_id=case.source_case_name or case.name,
+                passed=assertion is True and not validation_errors,
+                score=score,
+                assertion=assertion,
+                reason=reason,
+                errors=tuple(validation_errors),
+            )
+        )
+
+    for failure in report.failures:
+        outcomes.append(
+            CaseGate(
+                scenario_id=failure.source_case_name or failure.name,
+                passed=False,
+                errors=(failure.error_message,),
+            )
+        )
+
+    total = len(outcomes)
+    passed_count = sum(outcome.passed for outcome in outcomes)
+    pass_rate = passed_count / total if total else 0.0
+    mean_score = fmean(scores) if scores else 0.0
+    has_errors = any(outcome.errors for outcome in outcomes) or bool(
+        report.report_evaluator_failures
+    )
+    passed = (
+        total > 0
+        and not has_errors
+        and pass_rate >= policy.minimum_case_pass_rate
+        and mean_score >= policy.minimum_mean_score
+    )
+    return GateResult(
+        passed=passed,
+        case_pass_rate=pass_rate,
+        mean_score=mean_score,
+        cases=tuple(outcomes),
+    )
+
+
+def _report_payload(
+    report: EvaluationReport[Scenario, ScenarioResult, None],
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "name": report.name,
+        "experiment_metadata": report.experiment_metadata,
+        "trace_id": report.trace_id,
+        "span_id": report.span_id,
+        "cases": [
+            {
+                "name": case.name,
+                "source_case_name": case.source_case_name,
+                "input": case.inputs.model_dump(mode="json"),
+                "output": case.output.model_dump(mode="json"),
+                "scores": _evaluation_values(case.scores),
+                "assertions": _evaluation_values(case.assertions),
+                "metrics": case.metrics,
+                "attributes": case.attributes,
+                "task_duration": case.task_duration,
+                "total_duration": case.total_duration,
+                "trace_id": case.trace_id,
+                "span_id": case.span_id,
+                "evaluator_failures": [
+                    {
+                        "name": failure.name,
+                        "error_type": failure.error_type,
+                        "error_message": failure.error_message,
+                    }
+                    for failure in case.evaluator_failures
+                ],
+            }
+            for case in report.cases
+        ],
+        "task_failures": [
+            {
+                "name": failure.name,
+                "source_case_name": failure.source_case_name,
+                "input": _json_value(failure.inputs),
+                "error_message": failure.error_message,
+                "error_stacktrace": failure.error_stacktrace,
+                "trace_id": failure.trace_id,
+                "span_id": failure.span_id,
+            }
+            for failure in report.failures
+        ],
+        "report_evaluator_failures": [
+            {"name": failure.name, "error_message": failure.error_message}
+            for failure in report.report_evaluator_failures
+        ],
+    }
+
+
+def _evaluation_values(values: dict[str, Any]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for name, result in values.items():
+        payload[name] = {
+            "value": result.value,
+            "reason": result.reason,
+            "evaluator_version": result.evaluator_version,
+        }
+    return payload
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    return value
+
+
+def _write_text(path: Path, content: str) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
