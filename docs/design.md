@@ -36,10 +36,11 @@ does not inspect the baseline gate before starting the candidate. Per-arm artifa
 fixed `baseline/` and `candidate/` directories, followed by one paired comparison and root gate.
 
 Langfuse sits behind a small tracing protocol. With tracing disabled, no Langfuse package or network
-is needed. With tracing enabled, comparison, arm, scenario, and turn spans carry only typed,
-allowlisted identity fields. Scenario, arm, and comparison scores are explicit. Target configuration,
-argv, environment values, stderr, and command evidence are never trace metadata. Pydantic AI model
-content remains subject to its normal opt-in instrumentation.
+is needed. With tracing enabled, comparison, arm, and scenario roots are separate traces correlated
+by comparison ID. Target turns and model calls stay beneath their scenario root. Each observation
+carries only typed, allowlisted identity fields. Scenario, arm, and comparison scores are explicit.
+Target configuration, argv, environment values, stderr, and command evidence are never trace
+metadata. Pydantic AI model content remains subject to its normal opt-in instrumentation.
 
 ## Synthesis decision
 

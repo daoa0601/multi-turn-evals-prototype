@@ -232,6 +232,7 @@ def test_langfuse_adapter_emits_allowlisted_metadata_and_explicit_scores(
     runtime.shutdown()
 
     assert propagated[0]["tags"] == ["multiturn-eval", "variant:candidate"]
+    assert "trace_context" not in client.starts[0]
     metadata = client.starts[0]["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["repeat_index"] == 2

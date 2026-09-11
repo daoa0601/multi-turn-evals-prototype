@@ -116,12 +116,13 @@ uv run multiturn-evals compare scenarios/support.yaml \
   --langfuse
 ```
 
-The trace hierarchy is comparison, arm, scenario, and target turn. Allowlisted metadata identifies
-the comparison, arm, target, harness kind, scenario, repeat, run, and turn. Judge score, judge pass,
-arm gate, mean score, pass rate, and comparison deltas are attached as explicit scores. Pydantic AI
-instrumentation also exports model prompts and responses when tracing is enabled; configure Langfuse
-according to your data policy. GitHub Actions sets `LANGFUSE_RELEASE` to the evaluated commit. The
-runner calls Langfuse shutdown in a `finally` block.
+Comparison, arm, and scenario executions are separate Langfuse traces correlated by
+`comparison_id`; target turns and instrumented model calls are children of their scenario trace.
+Allowlisted metadata identifies the arm, target, harness kind, scenario, repeat, run, and turn. Judge
+score, judge pass, arm gate, mean score, pass rate, and comparison deltas are attached as explicit
+scores. Pydantic AI instrumentation also exports model prompts and responses when tracing is enabled;
+configure Langfuse according to your data policy. GitHub Actions sets `LANGFUSE_RELEASE` to the
+evaluated commit. The runner calls Langfuse shutdown in a `finally` block.
 
 Checked-in YAML remains the source of truth. Langfuse dataset sync is deliberately not part of a CI
 run, so a remote dataset edit cannot silently change a pull-request evaluation. Two hosted Langfuse

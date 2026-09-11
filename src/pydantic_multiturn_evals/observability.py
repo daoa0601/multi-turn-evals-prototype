@@ -175,33 +175,38 @@ class LangfuseTraceRuntime:
         as_type: str = "span",
     ) -> Iterator[TraceSpan]:
         from langfuse import propagate_attributes
+        from opentelemetry.context import Context, attach, detach
 
         metadata = fields.metadata()
         tags = ["multiturn-eval"]
         if fields.arm is not None:
             tags.append(f"variant:{fields.arm}")
-        with ExitStack() as stack:
-            stack.enter_context(
-                propagate_attributes(
-                    session_id=fields.run_id,
-                    trace_name=name,
-                    tags=tags,
-                    version=fields.version,
-                    metadata=metadata,
+        context_token = attach(Context())
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(
+                    propagate_attributes(
+                        session_id=fields.run_id,
+                        trace_name=name,
+                        tags=tags,
+                        version=fields.version,
+                        metadata=metadata,
+                    )
                 )
-            )
-            observation = stack.enter_context(
-                self._client.start_as_current_observation(
-                    name=name,
-                    as_type=as_type,
-                    input=input,
-                    metadata=metadata,
-                    version=fields.version,
+                observation = stack.enter_context(
+                    self._client.start_as_current_observation(
+                        name=name,
+                        as_type=as_type,
+                        input=input,
+                        metadata=metadata,
+                        version=fields.version,
+                    )
                 )
-            )
-            if fields.run_id is not None and fields.scenario_id is not None:
-                self._runs[fields.run_id] = observation
-            yield _LangfuseSpan(observation)
+                if fields.run_id is not None and fields.scenario_id is not None:
+                    self._runs[fields.run_id] = observation
+                yield _LangfuseSpan(observation)
+        finally:
+            detach(context_token)
 
     def score_run(
         self,
