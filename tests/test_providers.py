@@ -10,10 +10,12 @@ from pydantic_multiturn_evals.models import (
     ActorBrief,
     ActorSpec,
     AssistantTurn,
+    CaseKey,
     ConversationView,
     Exchange,
     ModelSpec,
     PydanticAITargetSpec,
+    SessionContext,
     UserTurn,
     ZAIProviderSpec,
 )
@@ -57,7 +59,12 @@ def test_pydantic_target_accepts_complete_history(monkeypatch: pytest.MonkeyPatc
         lambda spec: TestModel(custom_output_text="A response from the fake target."),
     )
     target = providers.PydanticAITarget(
-        PydanticAITargetSpec(version=1, kind="pydantic_ai", instructions="Help the user.")
+        PydanticAITargetSpec(
+            version=1,
+            name="test-target",
+            kind="pydantic_ai",
+            instructions="Help the user.",
+        )
     )
     view = ConversationView(
         run_id="run-1",
@@ -71,7 +78,19 @@ def test_pydantic_target_accepts_complete_history(monkeypatch: pytest.MonkeyPatc
         pending_user=UserTurn(content="Follow-up question"),
     )
 
-    assert asyncio.run(target(view)) == "A response from the fake target."
+    async def exercise() -> str:
+        context = SessionContext(
+            suite_name="test-suite",
+            target_name="test-target",
+            target_kind="pydantic_ai",
+            target_version=1,
+            key=CaseKey(scenario_id="help", repeat_index=1),
+            run_id="run-1",
+        )
+        async with target.session(context) as session:
+            return (await session.reply(view)).assistant_text
+
+    assert asyncio.run(exercise()) == "A response from the fake target."
 
 
 def test_build_model_uses_the_named_environment_key(monkeypatch: pytest.MonkeyPatch) -> None:

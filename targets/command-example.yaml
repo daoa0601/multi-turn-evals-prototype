@@ -1,0 +1,12 @@
+version: 1
+name: command-example
+kind: command
+argv: [.venv/bin/python, examples/jsonl_harness.py]
+cwd: ..
+inherit_env: []
+limits:
+  startup_seconds: 10
+  turn_seconds: 60
+  shutdown_seconds: 2
+  stdout_bytes_per_message: 1048576
+  stderr_bytes_per_session: 65536

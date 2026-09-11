@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from pydantic_multiturn_evals.models import (
     ActorBrief,
+    PydanticAITargetSpec,
     Scenario,
     SuiteSpec,
     ZAIProviderSpec,
@@ -25,9 +26,36 @@ ROOT = Path(__file__).parents[1]
 def test_example_files_are_valid() -> None:
     suite = load_suite(ROOT / "scenarios" / "support.yaml")
     target = load_target(ROOT / "targets" / "support.yaml")
+    candidate = load_target(ROOT / "targets" / "support-candidate.yaml")
+    command = load_target(ROOT / "targets" / "command-example.yaml")
 
     assert len(suite.scenarios) == 2
-    assert target.model.provider.endpoint_plan == "coding"
+    assert isinstance(target.spec, PydanticAITargetSpec)
+    assert target.spec.model.provider.endpoint_plan == "coding"
+    assert candidate.spec.name == "support-candidate"
+    assert command.spec.kind == "command"
+
+
+def test_command_target_cwd_is_resolved_from_its_yaml(tmp_path: Path) -> None:
+    target_file = tmp_path / "nested" / "target.yaml"
+    target_file.parent.mkdir()
+    target_file.write_text(
+        """\
+version: 1
+name: demo
+kind: command
+argv: [python, harness.py]
+cwd: ..
+inherit_env: [PATH]
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_target(target_file)
+
+    assert loaded.spec.kind == "command"
+    assert loaded.spec.cwd == tmp_path.resolve()
+    assert loaded.source_directory == target_file.parent.resolve()
 
 
 def test_duplicate_scenario_ids_are_rejected() -> None:

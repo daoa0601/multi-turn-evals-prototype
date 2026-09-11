@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import fmean
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from pydantic_ai import ModelSettings
@@ -23,25 +23,28 @@ from pydantic_evals.reporting import EvaluationReport
 
 from pydantic_multiturn_evals.models import (
     CaseGate,
+    CaseKey,
     GatePolicy,
     GateResult,
-    Scenario,
+    PlannedCase,
     ScenarioResult,
     SuiteSpec,
+    TargetFailureEvidence,
 )
+from pydantic_multiturn_evals.observability import NO_TRACE, TraceFields, TraceRuntime
 from pydantic_multiturn_evals.providers import PydanticActor, build_model, model_settings
 from pydantic_multiturn_evals.runner import (
     AdaptiveActor,
-    ChatTarget,
     RunnerServices,
     run_scenario,
 )
 from pydantic_multiturn_evals.spec import load_suite
 from pydantic_multiturn_evals.storage import InMemoryStateStore, StateStore
+from pydantic_multiturn_evals.targets import Target
 
 
 @dataclass
-class TranscriptJudge(Evaluator[Scenario, ScenarioResult, None]):
+class TranscriptJudge(Evaluator[PlannedCase, ScenarioResult, None]):
     """Run Pydantic's LLMJudge against visible exchanges only."""
 
     rubric: str
@@ -50,17 +53,20 @@ class TranscriptJudge(Evaluator[Scenario, ScenarioResult, None]):
 
     async def evaluate(
         self,
-        ctx: EvaluatorContext[Scenario, ScenarioResult, None],
+        ctx: EvaluatorContext[PlannedCase, ScenarioResult, None],
     ) -> EvaluatorOutput:
         judge = LLMJudge(
             rubric=self.rubric,
             model=self.model,
             model_settings=self.settings,
+            include_input=False,
+            include_expected_output=False,
             score={"evaluation_name": "judge_score", "include_reason": True},
             assertion={"evaluation_name": "judge_pass", "include_reason": True},
         )
         judge_context = replace(
             ctx,
+            inputs=None,
             expected_output=None,
             output=ctx.output.transcript,
         )
@@ -71,29 +77,31 @@ def build_dataset(
     suite: SuiteSpec,
     *,
     judge_model: Model,
-) -> Dataset[Scenario, ScenarioResult, None]:
+    repeat: int = 1,
+) -> Dataset[PlannedCase, ScenarioResult, None]:
     settings = model_settings(suite.judge.model)
     cases = [
-        Case[Scenario, ScenarioResult, None](
-            name=scenario.id,
-            inputs=scenario,
+        Case[PlannedCase, ScenarioResult, None](
+            name=planned.case_name,
+            inputs=planned,
             evaluators=(
                 TranscriptJudge(
-                    rubric=scenario.judge_rubric,
+                    rubric=planned.scenario.judge_rubric,
                     model=judge_model,
                     settings=settings,
                 ),
             ),
         )
-        for scenario in suite.scenarios
+        for planned in plan_cases(suite, repeat)
     ]
     return Dataset(name=suite.name, cases=cases)
 
 
 @dataclass(frozen=True, slots=True)
 class SuiteResult:
-    report: EvaluationReport[Scenario, ScenarioResult, None]
+    report: EvaluationReport[PlannedCase, ScenarioResult, None]
     gate: GateResult
+    failure_evidence: tuple[TargetFailureEvidence, ...] = ()
 
     def write_artifacts(self, directory: str | Path) -> None:
         output_directory = Path(directory)
@@ -108,24 +116,72 @@ class SuiteResult:
             output_directory / "report.txt",
             self.report.render(include_output=False, include_reasons=True),
         )
-        transcript_lines = [case.output.model_dump_json() for case in self.report.cases]
+        transcript_lines = [
+            json.dumps(
+                {
+                    "run_id": case.output.run_id,
+                    "scenario_id": case.output.scenario_id,
+                    "repeat_index": case.output.repeat_index,
+                    "transcript": case.output.transcript.model_dump(mode="json"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            for case in self.report.cases
+        ]
         transcript_text = "\n".join(transcript_lines)
         _write_text(
             output_directory / "transcripts.jsonl",
             transcript_text + ("\n" if transcript_text else ""),
         )
+        evidence_lines = [
+            json.dumps(
+                {
+                    "run_id": case.output.run_id,
+                    "scenario_id": case.output.scenario_id,
+                    "repeat_index": case.output.repeat_index,
+                    "turns": [item.model_dump(mode="json") for item in case.output.target_evidence],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            for case in self.report.cases
+        ]
+        evidence_lines.extend(item.model_dump_json() for item in self.failure_evidence)
+        evidence_text = "\n".join(evidence_lines)
+        _write_text(
+            output_directory / "evidence.jsonl",
+            evidence_text + ("\n" if evidence_text else ""),
+        )
+
+
+def plan_cases(suite: SuiteSpec, repeat: int) -> tuple[PlannedCase, ...]:
+    if repeat < 1:
+        raise ValueError("repeat must be positive")
+    return tuple(
+        PlannedCase(
+            key=CaseKey(scenario_id=scenario.id, repeat_index=repeat_index),
+            case_name=(scenario.id if repeat == 1 else f"{scenario.id} [{repeat_index}/{repeat}]"),
+            scenario=scenario,
+        )
+        for scenario in suite.scenarios
+        for repeat_index in range(1, repeat + 1)
+    )
 
 
 async def evaluate_suite(
     source: str | Path | SuiteSpec,
     *,
-    target: ChatTarget,
+    target: Target,
     actor: AdaptiveActor | None = None,
     judge_model: Model | None = None,
     state_store: StateStore | None = None,
     max_concurrency: int = 1,
     repeat: int = 1,
     progress: bool = True,
+    comparison_id: str | None = None,
+    arm: Literal["baseline", "candidate"] | None = None,
+    trace: TraceRuntime = NO_TRACE,
 ) -> SuiteResult:
     """Load, run, judge, aggregate, and gate one adaptive scenario suite."""
 
@@ -133,31 +189,72 @@ async def evaluate_suite(
     adaptive_actor = actor or PydanticActor(suite.actor)
     evaluator_model = judge_model or build_model(suite.judge.model)
     services = RunnerServices(state_store=state_store or InMemoryStateStore())
-    dataset = build_dataset(suite, judge_model=evaluator_model)
+    dataset = build_dataset(suite, judge_model=evaluator_model, repeat=repeat)
 
-    async def task(scenario: Scenario) -> ScenarioResult:
+    async def task(planned: PlannedCase) -> ScenarioResult:
         return await run_scenario(
-            scenario,
-            limits=suite.limits_for(scenario),
+            planned.scenario,
+            limits=suite.limits_for(planned.scenario),
             target=target,
             actor=adaptive_actor,
             services=services,
+            suite_name=suite.name,
+            key=planned.key,
+            comparison_id=comparison_id,
+            arm=arm,
+            trace=trace,
         )
 
-    report = await dataset.evaluate(
-        task,
-        name=suite.name,
-        task_name="adaptive_conversation",
-        max_concurrency=max_concurrency,
-        repeat=repeat,
-        progress=progress,
-        metadata={"suite": suite.name, "schema_version": suite.version},
+    fields = TraceFields(
+        suite=suite.name,
+        target=target.name,
+        harness=target.kind,
+        comparison_id=comparison_id,
+        arm=arm,
+        version=str(target.version),
     )
-    return SuiteResult(report=report, gate=derive_gate(report, suite.gate))
+    with trace.span("multiturn-evals.arm", fields, as_type="evaluator") as arm_span:
+        report = await dataset.evaluate(
+            task,
+            name=suite.name,
+            task_name="adaptive_conversation",
+            max_concurrency=max_concurrency,
+            repeat=1,
+            progress=progress,
+            metadata={
+                "suite": suite.name,
+                "schema_version": suite.version,
+                "comparison_id": comparison_id,
+                "arm": arm,
+                "target": target.name,
+                "harness": target.kind,
+            },
+        )
+        gate = derive_gate(report, suite.gate)
+        arm_span.score("case_pass_rate", gate.case_pass_rate)
+        arm_span.score("mean_score", gate.mean_score)
+        arm_span.score("gate_pass", float(gate.passed))
+        arm_span.update(gate.model_dump(mode="json"))
+    gates = {case.case_name: case for case in gate.cases}
+    for case in report.cases:
+        outcome = gates[case.name]
+        trace.score_run(
+            case.output.run_id,
+            case_name=case.name,
+            score=outcome.score,
+            assertion=outcome.assertion,
+            passed=outcome.passed,
+            reason=outcome.reason,
+        )
+    return SuiteResult(
+        report=report,
+        gate=gate,
+        failure_evidence=target.failure_evidence(),
+    )
 
 
 def derive_gate(
-    report: EvaluationReport[Scenario, ScenarioResult, None],
+    report: EvaluationReport[PlannedCase, ScenarioResult, None],
     policy: GatePolicy,
 ) -> GateResult:
     outcomes: list[CaseGate] = []
@@ -186,7 +283,9 @@ def derive_gate(
             reason = score_result.reason
         outcomes.append(
             CaseGate(
-                scenario_id=case.source_case_name or case.name,
+                case_name=case.name,
+                scenario_id=case.inputs.key.scenario_id,
+                repeat_index=case.inputs.key.repeat_index,
                 passed=assertion is True and not validation_errors,
                 score=score,
                 assertion=assertion,
@@ -198,7 +297,9 @@ def derive_gate(
     for failure in report.failures:
         outcomes.append(
             CaseGate(
-                scenario_id=failure.source_case_name or failure.name,
+                case_name=failure.name,
+                scenario_id=failure.inputs.key.scenario_id,
+                repeat_index=failure.inputs.key.repeat_index,
                 passed=False,
                 errors=(failure.error_message,),
             )
@@ -226,7 +327,7 @@ def derive_gate(
 
 
 def _report_payload(
-    report: EvaluationReport[Scenario, ScenarioResult, None],
+    report: EvaluationReport[PlannedCase, ScenarioResult, None],
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -238,8 +339,14 @@ def _report_payload(
             {
                 "name": case.name,
                 "source_case_name": case.source_case_name,
-                "input": case.inputs.model_dump(mode="json"),
-                "output": case.output.model_dump(mode="json"),
+                "input": case.inputs.scenario.model_dump(mode="json"),
+                "output": {
+                    "run_id": case.output.run_id,
+                    "scenario_id": case.output.scenario_id,
+                    "repeat_index": case.output.repeat_index,
+                    "transcript": case.output.transcript.model_dump(mode="json"),
+                    "evidence_file": "evidence.jsonl",
+                },
                 "scores": _evaluation_values(case.scores),
                 "assertions": _evaluation_values(case.assertions),
                 "metrics": case.metrics,

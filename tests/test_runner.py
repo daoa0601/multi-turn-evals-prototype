@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Literal
 
 from pydantic_multiturn_evals.models import (
     AcceptDecision,
@@ -8,6 +11,9 @@ from pydantic_multiturn_evals.models import (
     ContinueDecision,
     Scenario,
     ScenarioLimits,
+    SessionContext,
+    TargetFailureEvidence,
+    TargetReply,
     TurnLimitReached,
 )
 from pydantic_multiturn_evals.runner import (
@@ -30,13 +36,24 @@ class ScriptedActor:
 
 
 class ScriptedTarget:
+    name = "scripted"
+    kind: Literal["command"] = "command"
+    version = 1
+
     def __init__(self, *replies: str) -> None:
         self.replies = list(replies)
         self.views: list[ConversationView] = []
 
-    async def __call__(self, view: ConversationView) -> str:
+    @asynccontextmanager
+    async def session(self, context: SessionContext) -> AsyncIterator[ScriptedTarget]:
+        yield self
+
+    async def reply(self, view: ConversationView) -> TargetReply:
         self.views.append(view)
-        return self.replies.pop(0)
+        return TargetReply(assistant_text=self.replies.pop(0))
+
+    def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
+        return ()
 
 
 def scenario() -> Scenario:

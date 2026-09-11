@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tracing = ["langfuse>=4.10,<5"]
+tracing = ["langfuse>=4.12,<5"]
 
 [dependency-groups]
 dev = [

@@ -1,0 +1,15 @@
+version: 1
+name: support-candidate
+kind: pydantic_ai
+model:
+  name: glm-5.3-flash
+  provider:
+    endpoint_plan: coding
+    api_key_env: ZAI_API_KEY
+  options:
+    reasoning_effort: low
+    max_tokens: 700
+instructions: >-
+  You are a support assistant for a fictional service. Lead with the concrete next step. Ask one
+  focused question only when its answer changes that step. You cannot inspect accounts, submit
+  refunds, or cancel accounts, and you must never say that an external action is complete.

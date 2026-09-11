@@ -1,4 +1,5 @@
 version: 1
+name: support-current
 kind: pydantic_ai
 model:
   name: glm-5.3-flash

@@ -16,4 +16,4 @@ validate:
 	uv run multiturn-evals validate scenarios/support.yaml --target targets/support.yaml
 
 live:
-	uv run multiturn-evals run scenarios/support.yaml --target targets/support.yaml --out outputs/support
+	uv run multiturn-evals compare scenarios/support.yaml --baseline targets/support.yaml --candidate targets/support-candidate.yaml --out outputs/support-ab

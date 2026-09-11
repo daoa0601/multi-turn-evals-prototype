@@ -944,7 +944,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "langfuse", marker = "extra == 'tracing'", specifier = ">=4.10,<5" },
+    { name = "langfuse", marker = "extra == 'tracing'", specifier = ">=4.12,<5" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = "==2.42.0" },
     { name = "pydantic-evals", specifier = "==2.42.0" },

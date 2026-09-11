@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable
-from dataclasses import dataclass
-from typing import Protocol, TypeVar
+from dataclasses import dataclass, replace
+from time import perf_counter
+from typing import Literal, Protocol, TypeVar
 from uuid import uuid4
 
 from pydantic_multiturn_evals.models import (
@@ -15,6 +16,7 @@ from pydantic_multiturn_evals.models import (
     ActorDecision,
     ActorStopped,
     AssistantTurn,
+    CaseKey,
     ContinueDecision,
     ConversationState,
     ConversationView,
@@ -22,12 +24,16 @@ from pydantic_multiturn_evals.models import (
     Scenario,
     ScenarioLimits,
     ScenarioResult,
+    SessionContext,
     StopDecision,
+    TargetTurnEvidence,
     Transcript,
     TurnLimitReached,
     UserTurn,
 )
+from pydantic_multiturn_evals.observability import NO_TRACE, TraceFields, TraceRuntime
 from pydantic_multiturn_evals.storage import InMemoryStateStore, StateStore
+from pydantic_multiturn_evals.targets import Target
 
 T = TypeVar("T")
 
@@ -38,10 +44,6 @@ class ActorView:
     brief: ActorBrief
     exchanges: tuple[Exchange, ...]
     remaining_target_turns: int
-
-
-class ChatTarget(Protocol):
-    async def __call__(self, view: ConversationView) -> str: ...
 
 
 class AdaptiveActor(Protocol):
@@ -65,14 +67,30 @@ async def run_scenario(
     scenario: Scenario,
     *,
     limits: ScenarioLimits,
-    target: ChatTarget,
+    target: Target,
     actor: AdaptiveActor,
     services: RunnerServices | None = None,
+    suite_name: str = "library",
+    key: CaseKey | None = None,
+    comparison_id: str | None = None,
+    arm: Literal["baseline", "candidate"] | None = None,
+    trace: TraceRuntime = NO_TRACE,
 ) -> ScenarioResult:
     """Run one scenario until the actor stops it or the hard turn limit wins."""
 
     services = services or RunnerServices.in_memory()
     run_id = uuid4().hex
+    case_key = key or CaseKey(scenario_id=scenario.id, repeat_index=1)
+    session_context = SessionContext(
+        suite_name=suite_name,
+        target_name=target.name,
+        target_kind=target.kind,
+        target_version=target.version,
+        key=case_key,
+        run_id=run_id,
+        comparison_id=comparison_id,
+        arm=arm,
+    )
     state = ConversationState(
         run_id=run_id,
         scenario_id=scenario.id,
@@ -95,65 +113,121 @@ async def run_scenario(
                 f"scenario {scenario.id!r} exceeded {limits.timeout_seconds:g} seconds"
             ) from error
 
-    for _ in range(limits.max_target_turns):
-        pending_user = state.pending_user
-        if pending_user is None:  # pragma: no cover - protected by ConversationState
-            raise RuntimeError("running scenario has no pending user turn")
+    trace_fields = TraceFields(
+        suite=suite_name,
+        target=target.name,
+        harness=target.kind,
+        comparison_id=comparison_id,
+        arm=arm,
+        scenario_id=scenario.id,
+        repeat_index=case_key.repeat_index,
+        run_id=run_id,
+        version=str(target.version),
+    )
+    evidence: list[TargetTurnEvidence] = []
+    with trace.span(
+        "multiturn-evals.scenario",
+        trace_fields,
+        input={"first_prompt": scenario.first_prompt},
+        as_type="agent",
+    ) as scenario_span:
+        async with target.session(session_context) as target_session:
+            for turn_index in range(1, limits.max_target_turns + 1):
+                pending_user = state.pending_user
+                if pending_user is None:  # pragma: no cover - protected by ConversationState
+                    raise RuntimeError("running scenario has no pending user turn")
 
-        view = ConversationView(
-            run_id=run_id,
-            scenario_id=scenario.id,
-            exchanges=state.exchanges,
-            pending_user=pending_user,
-        )
-        reply = AssistantTurn(content=await before_deadline(target(view)))
-        exchanges = (*state.exchanges, Exchange(user=pending_user, assistant=reply))
-        remaining_turns = limits.max_target_turns - len(exchanges)
-        decision = await before_deadline(
-            actor.decide(
-                ActorView(
+                view = ConversationView(
+                    run_id=run_id,
                     scenario_id=scenario.id,
-                    brief=scenario.actor,
-                    exchanges=exchanges,
-                    remaining_target_turns=remaining_turns,
+                    exchanges=state.exchanges,
+                    pending_user=pending_user,
                 )
-            )
-        )
-        decisions = (*state.decisions, decision)
+                turn_fields = replace(trace_fields, turn_index=turn_index)
+                started = perf_counter()
+                with scenario_span.child(
+                    "multiturn-evals.target-turn",
+                    turn_fields,
+                    input=[
+                        {"role": message.role, "content": message.content}
+                        for message in view.messages
+                    ],
+                    as_type="agent",
+                ) as turn_span:
+                    target_reply = await before_deadline(target_session.reply(view))
+                    duration = perf_counter() - started
+                    turn_span.update(
+                        {
+                            "assistant_text": target_reply.assistant_text,
+                            "duration_seconds": duration,
+                        }
+                    )
+                evidence.append(
+                    TargetTurnEvidence(
+                        turn_index=turn_index,
+                        duration_seconds=duration,
+                        session_id=target_reply.session_id,
+                        executable=getattr(target, "executable", None),
+                        details=target_reply.evidence,
+                    )
+                )
+                reply = AssistantTurn(content=target_reply.assistant_text)
+                exchanges = (*state.exchanges, Exchange(user=pending_user, assistant=reply))
+                remaining_turns = limits.max_target_turns - len(exchanges)
+                decision = await before_deadline(
+                    actor.decide(
+                        ActorView(
+                            scenario_id=scenario.id,
+                            brief=scenario.actor,
+                            exchanges=exchanges,
+                            remaining_target_turns=remaining_turns,
+                        )
+                    )
+                )
+                decisions = (*state.decisions, decision)
 
-        if isinstance(decision, ContinueDecision) and remaining_turns > 0:
-            state = ConversationState(
-                run_id=run_id,
-                scenario_id=scenario.id,
-                exchanges=exchanges,
-                pending_user=UserTurn(content=decision.next_user_message),
-                decisions=decisions,
-            )
-            await services.state_store.save(state)
-            continue
+                if isinstance(decision, ContinueDecision) and remaining_turns > 0:
+                    state = ConversationState(
+                        run_id=run_id,
+                        scenario_id=scenario.id,
+                        exchanges=exchanges,
+                        pending_user=UserTurn(content=decision.next_user_message),
+                        decisions=decisions,
+                    )
+                    await services.state_store.save(state)
+                    continue
 
-        if isinstance(decision, AcceptDecision):
-            termination = ActorAccepted(reason=decision.reason)
-        elif isinstance(decision, StopDecision):
-            termination = ActorStopped(reason=decision.reason)
-        else:
-            termination = TurnLimitReached(limit=limits.max_target_turns)
+                if isinstance(decision, AcceptDecision):
+                    termination = ActorAccepted(reason=decision.reason)
+                elif isinstance(decision, StopDecision):
+                    termination = ActorStopped(reason=decision.reason)
+                else:
+                    termination = TurnLimitReached(limit=limits.max_target_turns)
 
-        state = ConversationState(
-            run_id=run_id,
-            scenario_id=scenario.id,
-            exchanges=exchanges,
-            pending_user=None,
-            decisions=decisions,
-            termination=termination,
-        )
-        await services.state_store.save(state)
-        return ScenarioResult(
-            run_id=run_id,
-            scenario_id=scenario.id,
-            transcript=Transcript(exchanges=exchanges),
-            decisions=decisions,
-            termination=termination,
-        )
+                state = ConversationState(
+                    run_id=run_id,
+                    scenario_id=scenario.id,
+                    exchanges=exchanges,
+                    pending_user=None,
+                    decisions=decisions,
+                    termination=termination,
+                )
+                await services.state_store.save(state)
+                result = ScenarioResult(
+                    run_id=run_id,
+                    scenario_id=scenario.id,
+                    repeat_index=case_key.repeat_index,
+                    transcript=Transcript(exchanges=exchanges),
+                    target_evidence=tuple(evidence),
+                    decisions=decisions,
+                    termination=termination,
+                )
+                scenario_span.update(
+                    {
+                        "termination": termination.kind,
+                        "target_turns": len(exchanges),
+                    }
+                )
+                return result
 
     raise RuntimeError("scenario loop exhausted without a terminal result")  # pragma: no cover

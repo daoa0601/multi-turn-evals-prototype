@@ -1,113 +1,146 @@
 # Pydantic multi-turn evals
 
-This package runs adaptive conversation scenarios through Pydantic Evals. Each scenario starts with
-an authored user prompt. A simulated user reads every target response and chooses the next message,
-accepts the interaction, or stops it. A separate LLM judge grades the frozen transcript.
+This package runs adaptive conversation scenarios through Pydantic Evals. Each scenario begins with
+an authored prompt. A simulated user reads each target reply and decides whether to continue,
+accept, or stop. A separate LLM judge grades only the visible user and assistant text.
 
-The target, simulated user, and judge default to `glm-5.3-flash`. The checked-in examples use the
-Z.AI Coding Plan endpoint and read `ZAI_API_KEY` from the process environment. The program does not
-read `.zshrc`; a local shell may export the variable from there, while GitHub Actions must provide it
-as a repository or environment secret.
+The packaged runner supports two target kinds:
 
-## Run the example
+- `pydantic_ai` runs a configured Pydantic AI agent.
+- `command` runs any CLI adapter that implements the versioned JSONL protocol below.
+
+The target, simulated user, and judge examples use `glm-5.3-flash` through the Z.AI Coding Plan
+endpoint. Credentials come from environment variables, never YAML.
+
+## Run the checked-in A/B comparison
 
 ```console
-uv sync
+uv sync --extra tracing
 uv run multiturn-evals validate scenarios/support.yaml --target targets/support.yaml
+uv run multiturn-evals validate scenarios/support.yaml --target targets/support-candidate.yaml
+uv run multiturn-evals compare scenarios/support.yaml \
+  --baseline targets/support.yaml \
+  --candidate targets/support-candidate.yaml \
+  --repeat 3 \
+  --out outputs/support-ab
+```
+
+The baseline and candidate run sequentially with fresh target, simulated-user, judge, and in-memory
+state objects. A failing baseline gate does not skip the candidate. The two arms begin from the same
+authored scenario, but later user turns adapt independently to each target's replies.
+
+Cases are paired by the typed `(scenario_id, repeat_index)` created before evaluation. Score and pass
+rate deltas are reported as candidate minus baseline; they are descriptive rather than claims of
+statistical significance. The compare command exits successfully only when both arm gates pass.
+
+```text
+outputs/support-ab/
+  gate.json
+  comparison.json
+  comparison.txt
+  baseline/
+    gate.json
+    report.json
+    report.txt
+    transcripts.jsonl
+    evidence.jsonl
+  candidate/
+    ...
+```
+
+Use `run` for one target:
+
+```console
 uv run multiturn-evals run scenarios/support.yaml \
   --target targets/support.yaml \
   --out outputs/support
 ```
 
-The run writes four reviewable artifacts:
+## Plug in another CLI harness
 
-- `report.txt` is the human-readable Pydantic Evals report.
-- `report.json` contains case inputs, full results, judge values, failures, and trace IDs.
-- `transcripts.jsonl` contains one complete scenario result per successful case.
-- `gate.json` is the small CI contract. The command exits with status 1 when its gate fails.
+[`targets/command-example.yaml`](targets/command-example.yaml) shows the command target format. `argv`
+is passed directly to `asyncio.create_subprocess_exec`; shell strings are not supported. `cwd`
+resolves relative to the target YAML. The child receives only names listed in `inherit_env`, and the
+configuration cannot contain environment values.
 
-The example suite allows at most three target replies per scenario, runs cases serially, and disables
-task retries. Those limits matter because replaying a state-changing conversation is unsafe unless
-the external system resets or accepts an idempotency key.
+One process is opened for each scenario and repeat. The runner writes one JSON object per line. The
+process first receives `start` and must answer `ready`:
 
-## Use a Python target
-
-The library target is an async callable. It receives complete user/assistant exchanges plus the one
-pending user turn. It does not need to use Pydantic AI.
-
-```python
-from pydantic_multiturn_evals import ConversationView, evaluate_suite
-
-
-async def target(view: ConversationView) -> str:
-    messages = [{"role": turn.role, "content": turn.content} for turn in view.messages]
-    return await existing_chat_application.reply(messages)
-
-
-result = await evaluate_suite("scenarios/support.yaml", target=target)
-result.report.print(include_reasons=True)
-result.write_artifacts("outputs/support")
-raise SystemExit(0 if result.gate.passed else 1)
+```json
+{"protocol":1,"type":"start","session":{"suite":"support-smoke","target":"command-example","scenario_id":"refund-needs-order-number","repeat_index":1,"run_id":"...","comparison_id":null,"arm":null}}
+{"protocol":1,"type":"ready"}
 ```
 
-`evaluate_suite()` compiles every scenario into a Pydantic `Case`. The task for that case is the
-entire adaptive conversation, not one model turn. Each case has its own rubric and its own Pydantic
-`LLMJudge`, configured to return both `judge_score` and `judge_pass`.
+Each turn contains the complete visible history. Reply IDs must match:
 
-The judge receives only the visible exchanges. It does not receive the simulated user's private
-brief, its accept/stop decision, or the reason for that decision.
+```json
+{"protocol":1,"type":"turn","id":1,"messages":[{"role":"user","content":"I need a refund."}]}
+{"protocol":1,"type":"reply","id":1,"assistant_text":"What is your order number?","session_id":"optional","evidence":{"route":"refund-intake"}}
+```
 
-## Scenario format
+At the end, the runner sends `{"protocol":1,"type":"close"}` and closes stdin. Startup, each reply,
+stdout line size, retained stderr, and shutdown are bounded. Timeout and cancellation terminate the
+whole process group and reap the direct child. The adapter in
+[`examples/jsonl_harness.py`](examples/jsonl_harness.py) is a small executable reference.
 
-[`scenarios/support.yaml`](scenarios/support.yaml) is the working example. A scenario owns:
+Only `assistant_text` becomes conversation text. Timing, the optional session ID, the sanitized
+executable name, and JSON evidence are written to `evidence.jsonl`. They are excluded from the judge
+request and Langfuse metadata. Failed commands add their bounded stderr to the local evidence file;
+the traced exception reports only its byte count. Do not put secrets in `argv`; operating-system
+process listings may show arguments even though this runner does not trace them.
 
-- `first_prompt`, the first user message;
-- an actor persona, goal, and private rules used to choose later user turns;
-- a judge rubric used only after the conversation ends;
-- optional turn and timeout limits.
+## Scenarios and judging
 
-Suite-level model and limit settings provide defaults. Unknown YAML fields fail validation, scenario
-IDs must be unique, and endpoint plans select one fixed URL:
+[`scenarios/support.yaml`](scenarios/support.yaml) is the working suite. A scenario owns its first
+prompt, a private simulated-user brief, a final judge rubric, and optional turn and timeout limits.
+Suite-level settings provide defaults. Unknown YAML fields fail validation and scenario IDs must be
+unique.
 
-- `general` uses `https://api.z.ai/api/paas/v4`.
-- `coding` uses `https://api.z.ai/api/coding/paas/v4`.
+The whole adaptive conversation is one Pydantic Evals case. The `TranscriptJudge` explicitly removes
+the case input and projects the result to visible user and assistant exchanges before calling
+Pydantic's `LLMJudge`. Private personas, actor decisions, termination reasons, command evidence, and
+stderr do not enter the judge request.
 
-The configuration can name an environment variable but cannot contain a base URL or API key value.
+## Langfuse tracing
 
-## State and tracing
-
-Conversation state lives in an `InMemoryStateStore` and is saved after every complete transition.
-That is enough for local runs and GitHub Actions because a scenario never moves between processes.
-Redis would not make external target effects exactly-once, so this first version does not pretend to
-offer crash resume. The `StateStore` protocol is available when a real cross-process use case exists.
-
-Every successful result contains its full typed transcript and controller decisions. Pydantic Evals
-adds report and case trace IDs. Langfuse tracing is opt-in:
+Tracing is optional:
 
 ```console
-uv sync --extra tracing
 export LANGFUSE_PUBLIC_KEY=...
 export LANGFUSE_SECRET_KEY=...
 export LANGFUSE_BASE_URL=https://cloud.langfuse.com
-uv run multiturn-evals run scenarios/support.yaml \
-  --target targets/support.yaml \
-  --out outputs/support \
+uv run multiturn-evals compare scenarios/support.yaml \
+  --baseline targets/support.yaml \
+  --candidate targets/support-candidate.yaml \
+  --out outputs/support-ab \
   --langfuse
 ```
 
-Local YAML remains the scenario source of truth. Langfuse dataset sync is intentionally absent from
-the first version, so a remote dataset edit cannot silently change a pull-request evaluation.
+The trace hierarchy is comparison, arm, scenario, and target turn. Allowlisted metadata identifies
+the comparison, arm, target, harness kind, scenario, repeat, run, and turn. Judge score, judge pass,
+arm gate, mean score, pass rate, and comparison deltas are attached as explicit scores. Pydantic AI
+instrumentation also exports model prompts and responses when tracing is enabled; configure Langfuse
+according to your data policy. GitHub Actions sets `LANGFUSE_RELEASE` to the evaluated commit. The
+runner calls Langfuse shutdown in a `finally` block.
 
-## Automation
+Checked-in YAML remains the source of truth. Langfuse dataset sync is deliberately not part of a CI
+run, so a remote dataset edit cannot silently change a pull-request evaluation. Two hosted Langfuse
+dataset experiment runs can be added later if the Langfuse comparison UI is required.
 
-`make check` runs formatting, lint, type checking, and tests with fake model behavior. The normal
-[`ci.yml`](.github/workflows/ci.yml) workflow runs that path without credentials.
+## State and automation
 
-[`live-evals.yml`](.github/workflows/live-evals.yml) is manual and runs the entire checked-in support
-suite with one case at a time. Configure an `evals` GitHub environment with `ZAI_API_KEY`. The job
-always uploads artifacts before it reports a failed gate.
+Conversation state is saved after every complete transition in an `InMemoryStateStore`. Redis is not
+needed for one local process or GitHub Actions job and would not make external target effects
+exactly-once. A target that changes an external database, queue, browser profile, or service remains
+responsible for isolating or resetting that state between arms.
 
-The model adapter follows the current Pydantic Evals and Pydantic AI 2.42 APIs. See the official
+`make check` runs formatting, lint, type checking, and behavior tests. The normal
+[`ci.yml`](.github/workflows/ci.yml) path needs no credentials. The manual
+[`live-evals.yml`](.github/workflows/live-evals.yml) workflow runs both checked-in target configs with
+Langfuse tracing and always uploads the complete comparison directory. Configure its `evals`
+environment with `ZAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY`.
+
+The model integration is pinned to Pydantic Evals and Pydantic AI 2.42. See the official
 [Pydantic Evals overview](https://pydantic.dev/docs/ai/evals/evals/),
 [LLMJudge guide](https://pydantic.dev/docs/ai/evals/evaluators/llm-judge/), and
-[GLM-5.3-Flash model page](https://docs.z.ai/guides/vlm/glm-5.3-flash).
+[Langfuse SDK experiments](https://langfuse.com/docs/evaluation/experiments/experiments-via-sdk).

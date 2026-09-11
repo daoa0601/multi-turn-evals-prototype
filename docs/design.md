@@ -2,64 +2,83 @@
 
 ## Problem
 
-Pydantic Evals runs one task callable per case, but it does not supply an adaptive conversational
-user. This package must turn one case into a bounded conversation, keep the simulated user separate
-from the final judge, and remain runnable in CI without Redis, Langfuse, or AgentTrace.
-
-## Usage
-
-Library callers provide one async chat target and call `evaluate_suite()`. The CLI builds that target
-from a separate Pydantic AI target file. In both paths, suite YAML supplies scenarios, actor and judge
-models, hard limits, and gate policy.
+The original Python target was one async text call. That was enough for Pydantic AI, but it could not
+own a persistent CLI process or guarantee cleanup on timeout. The packaged CLI also knew only one
+target configuration, so it could not produce an isolated two-arm comparison.
 
 ## Shape
 
-The Pydantic `Dataset` is the outer runner. Each `Case` input is a `Scenario`; its task executes the
-whole conversation and returns a `ScenarioResult`. Complete `Exchange` values prevent the actor and
-judge from seeing a half-written turn. Tagged actor decisions and terminal states keep transition
-logic explicit. The runner, not the actor prompt, enforces the target-turn and wall-clock limits.
+Target YAML is a strict union selected by `kind`. The exhaustive factory returns either a Pydantic AI
+target or a command target. Both expose the same lifecycle:
 
-Each case gets a `TranscriptJudge`, a small adapter around Pydantic's `LLMJudge`. The adapter replaces
-the evaluator output with the public transcript before judging, so actor decisions cannot bias the
-verdict. The gate reads the resulting report dataclass and fails closed on task errors, evaluator
-errors, missing results, or non-finite scores.
+```text
+Target.session(SessionContext) -> async TargetSession
+TargetSession.reply(ConversationView) -> TargetReply
+```
 
-Provider construction has one fixed URL per Z.AI endpoint plan. The same OpenAI-compatible Pydantic
-model adapter covers both official chat-completion endpoints. API keys come only from the named
-environment variable.
+The scenario runner creates the run ID and owns one target session around the complete adaptive
+conversation. Pydantic AI has a zero-resource session. A command session owns one subprocess,
+versioned JSONL, byte and time limits, stderr draining, process-group termination, and reaping.
+
+`TargetReply.assistant_text` becomes an `AssistantTurn`. Structured evidence becomes immutable
+`TargetTurnEvidence` on the scenario result and is written separately. The judge gets an explicit
+`Transcript` projection after the evaluator input is cleared, so it sees only public user and
+assistant text.
+
+Repeats are expanded into `PlannedCase` values before Pydantic Evals runs. Each owns a typed
+`CaseKey(scenario_id, repeat_index)`. Pydantic display names are derived from that key, while A/B
+pairing uses the key itself. This keeps failed and repeated cases stable without parsing report-name
+formatting.
+
+The A/B coordinator accepts exactly one baseline and one candidate target. It validates and builds
+both first, then runs them sequentially with fresh targets, actors, judges, stores, and reports. It
+does not inspect the baseline gate before starting the candidate. Per-arm artifacts are written under
+fixed `baseline/` and `candidate/` directories, followed by one paired comparison and root gate.
+
+Langfuse sits behind a small tracing protocol. With tracing disabled, no Langfuse package or network
+is needed. With tracing enabled, comparison, arm, scenario, and turn spans carry only typed,
+allowlisted identity fields. Scenario, arm, and comparison scores are explicit. Target configuration,
+argv, environment values, stderr, and command evidence are never trace metadata. Pydantic AI model
+content remains subject to its normal opt-in instrumentation.
 
 ## Synthesis decision
 
-Candidate 2 was the base because its complete-exchange representation and fail-closed gate made the
-legal states clearer. Candidate 1 contributed its explicit per-case gate records, atomic artifact
-writes, a dedicated YAML module, and the decision to treat Redis as short-lived observation rather
-than reliable resume.
+Two designs were compared. The session-and-case-plan design won because JSONL, cancellation cleanup,
+and typed repeat identity are correctness boundaries rather than optional detail. The final shape
+also keeps target-file source provenance, stores evidence on immutable scenario results, and judges a
+visible transcript instead of assistant text alone.
 
-Three ideas were rejected. The actor does not import Agent Blocks because that code is an unpublished
-TypeScript coding orchestrator, not a Python simulated-user runtime. The judge does not receive the
-actor's termination reason. Redis, AgentTrace, and Langfuse do not own execution or scenario data.
+The public CLI uses direct `--baseline` and `--candidate` paths instead of adding a third comparison
+file. Two target files are already the reproducible configurations, and fixed option names encode the
+requested cardinality.
 
 ## Tradeoffs
 
-- The target receives its full visible history on each call. This keeps the target boundary stateless
-  and provider-neutral at the cost of resending messages.
-- State remains process-local. This avoids false exactly-once claims, but a killed job reruns a case
-  from the beginning.
-- The first transcript contains text exchanges only. Tool and environment evidence should become
-  explicit domain fields when a concrete target needs them.
-- A shared model may play target, actor, and judge in the example. Their prompts and calls remain
-  separate so another model can replace any role during calibration.
+- One process per case isolates concurrent scenarios and arms, at the cost of process startup.
+- Every command turn carries the complete visible history. Harness adapters can map that snapshot to
+  their own session model without relying on hidden runner state.
+- Arms run sequentially. This avoids doubling the configured concurrency and reduces cross-arm rate
+  limit interference.
+- The combined CI gate requires both arms to pass. Score deltas are descriptive and do not imply
+  statistical significance.
+- Local objects are isolated, but external databases, browser profiles, queues, and APIs are outside
+  the runner's reset boundary.
+- State stays process-local. Redis would not provide crash-safe replay or exactly-once external
+  effects, so it is not included.
 
-## Alternatives
+## Alternatives rejected
 
-A public start/advance/judge state machine lost because callers would have to coordinate legal
-ordering. A bespoke batch runner followed by Pydantic reporting lost because it would create two
-schedulers and hide task failures from Pydantic. Redis-first workers lost because queue leases and
-idempotency would become required even though CI cases fit in one process.
+A new subprocess per turn lost because it cannot preserve a CLI browser or agent session. One
+subprocess for the whole suite lost because concurrent cases would share mutable state. A generic
+list of experiment arms lost because it adds baseline-selection and scheduling policy that a fixed
+A/B comparison does not need. Passing Pydantic's `repeat` through and parsing report labels lost
+because display names are not a domain identity. Sending full scenario results to the judge lost
+because private actor state and command evidence could bias the verdict.
 
-## Verification
+## Verification contract
 
-`make check` passes 14 behavior tests with 87 percent branch-aware coverage, Ruff, and BasedPyright.
-The checked-in YAML validates. A live `glm-5.3-flash` run through the Coding Plan endpoint completed
-both scenarios. The refund scenario used two target turns and supplied its order number only after the
-target asked for it. Both independent Pydantic judges returned a passing assertion and score 1.0.
+Behavior tests run a real JSONL subprocess and cover two turns, malformed JSON, nonzero exit,
+oversized output, timeout cancellation, and child reaping. Comparison tests prove both configurations
+run, a failed baseline gate does not skip the candidate, every repeat pairs by `CaseKey`, and artifact
+directories do not overwrite. Fake tracing tests check identity fields and scores without depending
+on a Langfuse server.

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_ai import ModelSettings
 from pydantic_ai.messages import ModelMessage, ModelResponse
@@ -16,7 +18,10 @@ from pydantic_multiturn_evals.models import (
     ActorBrief,
     GatePolicy,
     Scenario,
+    SessionContext,
     SuiteSpec,
+    TargetFailureEvidence,
+    TargetReply,
 )
 from pydantic_multiturn_evals.runner import ActorView, ConversationView
 
@@ -26,8 +31,31 @@ class AcceptingActor:
         return AcceptDecision(reason=f"Observed {len(view.exchanges)} complete exchange.")
 
 
-async def helpful_target(view: ConversationView) -> str:
+class EvalTarget:
+    name = "test-target"
+    kind: Literal["command"] = "command"
+    version = 1
+
+    def __init__(self, reply: Callable[[ConversationView], Awaitable[str]]) -> None:
+        self._reply = reply
+
+    @asynccontextmanager
+    async def session(self, context: SessionContext) -> AsyncIterator[EvalTarget]:
+        yield self
+
+    async def reply(self, view: ConversationView) -> TargetReply:
+        return TargetReply(assistant_text=await self._reply(view))
+
+    def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
+        return ()
+
+
+async def helpful_reply(view: ConversationView) -> str:
     return f"I can help with: {view.pending_user.content}"
+
+
+def helpful_target() -> EvalTarget:
+    return EvalTarget(helpful_reply)
 
 
 class RecordingJudge(TestModel):
@@ -69,7 +97,7 @@ def test_pydantic_report_drives_a_passing_gate_and_artifacts(tmp_path: Path) -> 
     result = asyncio.run(
         evaluate_suite(
             suite(),
-            target=helpful_target,
+            target=helpful_target(),
             actor=AcceptingActor(),
             judge_model=judge,
             progress=False,
@@ -96,7 +124,7 @@ def test_gate_fails_when_the_judge_score_misses_the_suite_threshold() -> None:
     result = asyncio.run(
         evaluate_suite(
             suite(minimum_score=0.8),
-            target=helpful_target,
+            target=helpful_target(),
             actor=AcceptingActor(),
             judge_model=judge,
             progress=False,
@@ -114,7 +142,7 @@ def test_target_error_becomes_a_failed_pydantic_case() -> None:
     result = asyncio.run(
         evaluate_suite(
             suite(),
-            target=broken_target,
+            target=EvalTarget(broken_target),
             actor=AcceptingActor(),
             judge_model=TestModel(),
             progress=False,

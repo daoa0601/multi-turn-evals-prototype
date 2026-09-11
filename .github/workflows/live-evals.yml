@@ -17,26 +17,31 @@ jobs:
     environment: evals
     env:
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_RELEASE: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
       - run: uv python install 3.11
-      - run: uv sync --locked
+      - run: uv sync --extra tracing --locked
       - id: eval
         continue-on-error: true
         run: >-
-          uv run multiturn-evals run scenarios/support.yaml
-          --target targets/support.yaml
-          --out outputs/support
+          uv run multiturn-evals compare scenarios/support.yaml
+          --baseline targets/support.yaml
+          --candidate targets/support-candidate.yaml
+          --out outputs/support-ab
           --max-concurrency 1
           --no-progress
+          --langfuse
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: support-eval-${{ github.run_id }}
-          path: outputs/support
+          path: outputs/support-ab
           if-no-files-found: error
       - if: steps.eval.outcome == 'failure'
         run: exit 1

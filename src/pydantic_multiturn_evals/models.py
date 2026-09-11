@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Identifier = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*$")]
@@ -92,6 +93,30 @@ Termination: TypeAlias = Annotated[
 ]
 
 
+class TargetReply(StrictModel):
+    assistant_text: Text
+    session_id: str | None = None
+    evidence: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class TargetTurnEvidence(StrictModel):
+    turn_index: int = Field(ge=1)
+    duration_seconds: float = Field(ge=0)
+    session_id: str | None = None
+    executable: str | None = None
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class TargetFailureEvidence(StrictModel):
+    run_id: str
+    scenario_id: Identifier
+    repeat_index: int = Field(ge=1)
+    error_type: str
+    stderr: str = ""
+    stderr_truncated: bool = False
+    exit_code: int | None = None
+
+
 class Transcript(StrictModel):
     """The only part of a result shown to the LLM judge."""
 
@@ -101,7 +126,9 @@ class Transcript(StrictModel):
 class ScenarioResult(StrictModel):
     run_id: str
     scenario_id: Identifier
+    repeat_index: int = Field(default=1, ge=1)
     transcript: Transcript
+    target_evidence: tuple[TargetTurnEvidence, ...] = ()
     decisions: tuple[ActorDecision, ...]
     termination: Termination
 
@@ -205,13 +232,69 @@ class SuiteSpec(StrictModel):
 
 class PydanticAITargetSpec(StrictModel):
     version: Literal[1]
+    name: Identifier
     kind: Literal["pydantic_ai"]
     model: ModelSpec = ModelSpec()
     instructions: Text
 
 
+class CommandLimits(StrictModel):
+    startup_seconds: float = Field(default=10, gt=0, le=120)
+    turn_seconds: float = Field(default=90, gt=0, le=600)
+    shutdown_seconds: float = Field(default=2, gt=0, le=30)
+    stdout_bytes_per_message: int = Field(default=1024 * 1024, gt=0, le=16 * 1024 * 1024)
+    stderr_bytes_per_session: int = Field(default=64 * 1024, gt=0, le=16 * 1024 * 1024)
+
+
+class CommandTargetSpec(StrictModel):
+    version: Literal[1]
+    name: Identifier
+    kind: Literal["command"]
+    argv: tuple[Text, ...] = Field(min_length=1)
+    cwd: Path = Path(".")
+    inherit_env: tuple[EnvironmentName, ...] = ()
+    limits: CommandLimits = CommandLimits()
+
+    @model_validator(mode="after")
+    def reject_duplicate_environment_names(self) -> CommandTargetSpec:
+        if len(self.inherit_env) != len(set(self.inherit_env)):
+            raise ValueError("inherit_env names must be unique")
+        return self
+
+
+TargetSpec: TypeAlias = Annotated[
+    PydanticAITargetSpec | CommandTargetSpec,
+    Field(discriminator="kind"),
+]
+
+
+class CaseKey(StrictModel):
+    scenario_id: Identifier
+    repeat_index: int = Field(ge=1)
+
+
+class PlannedCase(StrictModel):
+    key: CaseKey
+    case_name: Text
+    scenario: Scenario
+
+
+@dataclass(frozen=True, slots=True)
+class SessionContext:
+    suite_name: str
+    target_name: str
+    target_kind: Literal["pydantic_ai", "command"]
+    target_version: int
+    key: CaseKey
+    run_id: str
+    comparison_id: str | None = None
+    arm: Literal["baseline", "candidate"] | None = None
+
+
 class CaseGate(StrictModel):
+    case_name: str
     scenario_id: str
+    repeat_index: int = Field(default=1, ge=1)
     passed: bool
     score: float | None = None
     assertion: bool | None = None

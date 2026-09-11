@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Literal, cast
 
 from pydantic import model_validator
@@ -22,8 +24,11 @@ from pydantic_multiturn_evals.models import (
     ConversationView,
     ModelSpec,
     PydanticAITargetSpec,
+    SessionContext,
     StopDecision,
     StrictModel,
+    TargetFailureEvidence,
+    TargetReply,
     Text,
     UserTurn,
 )
@@ -132,13 +137,21 @@ class PydanticActor:
 
 
 class PydanticAITarget:
+    kind: Literal["pydantic_ai"] = "pydantic_ai"
+
     def __init__(self, spec: PydanticAITargetSpec) -> None:
+        self.name = spec.name
+        self.version = spec.version
         self._settings = model_settings(spec.model)
         self._agent = Agent(
             build_model(spec.model), output_type=str, instructions=spec.instructions
         )
 
-    async def __call__(self, view: ConversationView) -> str:
+    @asynccontextmanager
+    async def session(self, context: SessionContext) -> AsyncIterator[PydanticAITarget]:
+        yield self
+
+    async def reply(self, view: ConversationView) -> TargetReply:
         result = await self._agent.run(
             view.pending_user.content,
             message_history=_message_history(view),
@@ -146,7 +159,10 @@ class PydanticAITarget:
             model_settings=self._settings,
             metadata={"scenario_id": view.scenario_id, "eval_role": "target"},
         )
-        return result.output
+        return TargetReply(assistant_text=result.output)
+
+    def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
+        return ()
 
 
 def _message_history(view: ConversationView) -> tuple[ModelMessage, ...]:
