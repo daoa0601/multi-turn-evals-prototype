@@ -13,7 +13,10 @@ def send(payload: dict[str, object]) -> None:
 for line in sys.stdin:
     request = json.loads(line)
     if request["type"] == "start":
-        send({"protocol": 1, "type": "ready"})
+        send({"protocol": 2, "type": "ready"})
+        continue
+    if request["type"] == "finish":
+        send({"protocol": 2, "type": "finished", "completion": {}})
         continue
     if request["type"] == "close":
         break
@@ -21,7 +24,7 @@ for line in sys.stdin:
     latest_user_message = request["messages"][-1]["content"]
     send(
         {
-            "protocol": 1,
+            "protocol": 2,
             "type": "reply",
             "id": request["id"],
             "assistant_text": f"Example harness received: {latest_user_message}",

@@ -1,0 +1,75 @@
+name: Environment evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Execution backend
+        required: true
+        type: choice
+        options:
+          - agentenv
+          - harbor
+
+permissions:
+  contents: read
+
+concurrency:
+  group: environment-evals-${{ inputs.backend }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: evals
+    env:
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      E2B_API_URL: ${{ secrets.E2B_API_URL }}
+      E2B_SANDBOX_URL: ${{ secrets.E2B_SANDBOX_URL }}
+      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_RELEASE: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.11 3.12
+      - run: uv sync --all-extras --locked
+      - if: inputs.backend == 'agentenv'
+        run: >-
+          uv run python scripts/compat_smoke.py agentenv
+          --template pydantic-multiturn-eval-baseline-v1
+      - id: agentenv
+        if: inputs.backend == 'agentenv'
+        continue-on-error: true
+        run: >-
+          uv run multiturn-evals compare scenarios/support.yaml
+          --baseline targets/agentenv-baseline.yaml
+          --candidate targets/agentenv-candidate.yaml
+          --out outputs/agentenv-ab
+          --max-concurrency 2
+          --no-progress
+          --langfuse
+      - id: harbor
+        if: inputs.backend == 'harbor'
+        continue-on-error: true
+        run: >-
+          uv run multiturn-evals harbor-compare scenarios/support.yaml
+          --baseline harbor/baseline.example.yaml
+          --candidate harbor/candidate.example.yaml
+          --out outputs/harbor-ab
+          --max-concurrency 2
+          --no-progress
+          --langfuse
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.backend }}-eval-${{ github.run_id }}
+          path: outputs/
+          if-no-files-found: error
+      - if: steps.agentenv.outcome == 'failure' || steps.harbor.outcome == 'failure'
+        run: exit 1

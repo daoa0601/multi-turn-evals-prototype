@@ -13,6 +13,10 @@ from pydantic_multiturn_evals.models import (
     CommandTargetSpec,
     ConversationView,
     SessionContext,
+    SessionOutcome,
+    TargetCompletion,
+    Transcript,
+    TurnLimitReached,
     UserTurn,
 )
 from pydantic_multiturn_evals.spec import LoadedTarget
@@ -78,11 +82,29 @@ def test_command_target_uses_one_jsonl_session_and_returns_evidence() -> None:
         async with target.session(context()) as session:
             first = await session.reply(view())
             second = await session.reply(view())
+            completion = await session.finish(
+                SessionOutcome(
+                    transcript=Transcript(exchanges=()),
+                    decisions=(),
+                    termination=TurnLimitReached(limit=2),
+                )
+            )
 
         assert first.assistant_text == "example reply 1"
         assert second.assistant_text == "example reply 2"
         assert first.evidence["message_count"] == 1
         assert first.session_id == second.session_id
+        assert completion == TargetCompletion(details={"adapter_finished": True})
+
+    asyncio.run(exercise())
+
+
+def test_command_protocol_rejects_version_one() -> None:
+    async def exercise() -> None:
+        target = command_target(mode="version-one")
+        with pytest.raises(RuntimeError, match="invalid ready message"):
+            async with target.session(context()):
+                pass
 
     asyncio.run(exercise())
 

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
-from typing import Literal, Protocol
+from typing import Protocol
 
 from pydantic_multiturn_evals.models import (
+    AgentEnvTargetSpec,
     CommandTargetSpec,
     ConversationView,
     PydanticAITargetSpec,
     SessionContext,
+    SessionOutcome,
+    TargetCompletion,
     TargetFailureEvidence,
+    TargetKind,
     TargetReply,
 )
 from pydantic_multiturn_evals.spec import LoadedTarget
@@ -19,13 +23,15 @@ from pydantic_multiturn_evals.spec import LoadedTarget
 class TargetSession(Protocol):
     async def reply(self, view: ConversationView) -> TargetReply: ...
 
+    async def finish(self, outcome: SessionOutcome) -> TargetCompletion: ...
+
 
 class Target(Protocol):
     @property
     def name(self) -> str: ...
 
     @property
-    def kind(self) -> Literal["pydantic_ai", "command"]: ...
+    def kind(self) -> TargetKind: ...
 
     @property
     def version(self) -> int: ...
@@ -47,4 +53,8 @@ def build_target(loaded: LoadedTarget) -> Target:
         from pydantic_multiturn_evals.command_target import CommandTarget
 
         return CommandTarget(spec)
+    if isinstance(spec, AgentEnvTargetSpec):
+        from pydantic_multiturn_evals.agentenv_target import AgentEnvTarget
+
+        return AgentEnvTarget(spec)
     raise AssertionError(f"unhandled target kind: {spec}")

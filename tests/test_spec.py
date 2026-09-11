@@ -5,8 +5,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from pydantic_multiturn_evals.harbor_runner import load_harbor_arm
 from pydantic_multiturn_evals.models import (
     ActorBrief,
+    AgentEnvTargetSpec,
     PydanticAITargetSpec,
     Scenario,
     SuiteSpec,
@@ -19,6 +21,7 @@ from pydantic_multiturn_evals.providers import (
     zai_base_url,
 )
 from pydantic_multiturn_evals.spec import load_suite, load_target
+from pydantic_multiturn_evals.targets import build_target
 
 ROOT = Path(__file__).parents[1]
 
@@ -28,12 +31,22 @@ def test_example_files_are_valid() -> None:
     target = load_target(ROOT / "targets" / "support.yaml")
     candidate = load_target(ROOT / "targets" / "support-candidate.yaml")
     command = load_target(ROOT / "targets" / "command-example.yaml")
+    agentenv = load_target(ROOT / "targets" / "agentenv-example.yaml")
+    agentenv_baseline = load_target(ROOT / "targets" / "agentenv-baseline.yaml")
+    agentenv_candidate = load_target(ROOT / "targets" / "agentenv-candidate.yaml")
+    harbor = load_harbor_arm(ROOT / "harbor" / "baseline.example.yaml")
 
     assert len(suite.scenarios) == 2
     assert isinstance(target.spec, PydanticAITargetSpec)
     assert target.spec.model.provider.endpoint_plan == "coding"
     assert candidate.spec.name == "support-candidate"
     assert command.spec.kind == "command"
+    assert isinstance(agentenv.spec, AgentEnvTargetSpec)
+    assert agentenv.spec.template == "pydantic-multiturn-eval-v1"
+    assert build_target(agentenv).kind == "agentenv"
+    assert agentenv_baseline.spec.name != agentenv_candidate.spec.name
+    assert harbor.spec.kind == "harbor"
+    assert harbor.spec.base_config == (ROOT / "harbor" / "base-job.baseline.example.yaml").resolve()
 
 
 def test_command_target_cwd_is_resolved_from_its_yaml(tmp_path: Path) -> None:

@@ -25,8 +25,10 @@ from pydantic_multiturn_evals.models import (
     ModelSpec,
     PydanticAITargetSpec,
     SessionContext,
+    SessionOutcome,
     StopDecision,
     StrictModel,
+    TargetCompletion,
     TargetFailureEvidence,
     TargetReply,
     Text,
@@ -160,6 +162,9 @@ class PydanticAITarget:
             metadata={"scenario_id": view.scenario_id, "eval_role": "target"},
         )
         return TargetReply(assistant_text=result.output)
+
+    async def finish(self, outcome: SessionOutcome) -> TargetCompletion:
+        return TargetCompletion()
 
     def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
         return ()

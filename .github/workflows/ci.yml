@@ -21,3 +21,4 @@ jobs:
       - run: uv sync --all-extras --locked
       - run: make check
       - run: make validate
+      - run: make compat

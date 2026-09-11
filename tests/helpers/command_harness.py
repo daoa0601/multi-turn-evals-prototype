@@ -20,7 +20,17 @@ if pid_file:
 for raw_line in sys.stdin:
     request = json.loads(raw_line)
     if request["type"] == "start":
-        send({"protocol": 1, "type": "ready"})
+        protocol = 1 if mode == "version-one" else 2
+        send({"protocol": protocol, "type": "ready"})
+        continue
+    if request["type"] == "finish":
+        send(
+            {
+                "protocol": 2,
+                "type": "finished",
+                "completion": {"details": {"adapter_finished": True}},
+            }
+        )
         continue
     if request["type"] == "close":
         break
@@ -35,7 +45,7 @@ for raw_line in sys.stdin:
     if mode == "wrong-id":
         send(
             {
-                "protocol": 1,
+                "protocol": 2,
                 "type": "reply",
                 "id": request["id"] + 1,
                 "assistant_text": "wrong turn",
@@ -51,7 +61,7 @@ for raw_line in sys.stdin:
     turn_id = request["id"]
     send(
         {
-            "protocol": 1,
+            "protocol": 2,
             "type": "reply",
             "id": turn_id,
             "assistant_text": f"{variant} reply {turn_id}",

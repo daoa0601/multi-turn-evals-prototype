@@ -6,13 +6,20 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from pydantic_ai.models import Model
 
-from pydantic_multiturn_evals.evaluation import SuiteResult, evaluate_suite, plan_cases
-from pydantic_multiturn_evals.models import CaseGate, CaseKey, StrictModel, SuiteSpec
+from pydantic_multiturn_evals.evaluation import evaluate_suite, plan_cases
+from pydantic_multiturn_evals.models import (
+    CaseGate,
+    CaseKey,
+    ExecutionKind,
+    GateResult,
+    StrictModel,
+    SuiteSpec,
+)
 from pydantic_multiturn_evals.observability import NO_TRACE, TraceFields, TraceRuntime
 from pydantic_multiturn_evals.providers import PydanticActor, build_model
 from pydantic_multiturn_evals.runner import AdaptiveActor
@@ -23,7 +30,7 @@ from pydantic_multiturn_evals.targets import build_target
 class ArmSummary(StrictModel):
     role: Literal["baseline", "candidate"]
     target_name: str
-    target_kind: Literal["pydantic_ai", "command"]
+    target_kind: ExecutionKind
     passed: bool
     case_pass_rate: float
     mean_score: float
@@ -49,12 +56,22 @@ class ComparisonSummary(StrictModel):
     pairs: tuple[PairResult, ...]
 
 
+class ArmResult(Protocol):
+    @property
+    def gate(self) -> GateResult: ...
+
+    @property
+    def report(self) -> Any: ...
+
+    def write_artifacts(self, directory: str | Path) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class CompletedArm:
     role: Literal["baseline", "candidate"]
     target_name: str
-    target_kind: Literal["pydantic_ai", "command"]
-    result: SuiteResult
+    target_kind: ExecutionKind
+    result: ArmResult
 
     def summary(self) -> ArmSummary:
         gate = self.result.gate
@@ -175,7 +192,7 @@ async def compare_suite(
             target_kind=candidate_target.kind,
             result=candidate_result,
         )
-        pairs = _pair_results(suite, repeat, baseline_result, candidate_result)
+        pairs = pair_results(suite, repeat, baseline_result, candidate_result)
         result = ComparisonResult(
             comparison_id=comparison_id,
             suite_name=suite.name,
@@ -194,11 +211,11 @@ async def compare_suite(
         return result
 
 
-def _pair_results(
+def pair_results(
     suite: SuiteSpec,
     repeat: int,
-    baseline: SuiteResult,
-    candidate: SuiteResult,
+    baseline: ArmResult,
+    candidate: ArmResult,
 ) -> tuple[PairResult, ...]:
     baseline_cases = {case.case_name: case for case in baseline.gate.cases}
     candidate_cases = {case.case_name: case for case in candidate.gate.cases}

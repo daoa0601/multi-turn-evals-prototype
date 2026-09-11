@@ -1,0 +1,4 @@
+agents:
+  - name: claude-code
+environment:
+  type: e2b

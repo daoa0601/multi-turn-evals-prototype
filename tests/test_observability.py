@@ -14,7 +14,9 @@ from pydantic_multiturn_evals.models import (
     ActorBrief,
     Scenario,
     SessionContext,
+    SessionOutcome,
     SuiteSpec,
+    TargetCompletion,
     TargetFailureEvidence,
     TargetReply,
 )
@@ -98,6 +100,9 @@ class OneReplyTarget:
 
     async def reply(self, view: ConversationView) -> TargetReply:
         return TargetReply(assistant_text="A safe answer.", evidence={"secret": "local-only"})
+
+    async def finish(self, outcome: SessionOutcome) -> TargetCompletion:
+        return TargetCompletion()
 
     def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
         return ()

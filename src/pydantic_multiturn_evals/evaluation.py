@@ -141,6 +141,7 @@ class SuiteResult:
                     "scenario_id": case.output.scenario_id,
                     "repeat_index": case.output.repeat_index,
                     "turns": [item.model_dump(mode="json") for item in case.output.target_evidence],
+                    "completion": case.output.completion.model_dump(mode="json"),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -268,6 +269,7 @@ def derive_gate(
         assertion_result = case.assertions.get("judge_pass")
         score = float(score_result.value) if score_result is not None else None
         assertion = bool(assertion_result.value) if assertion_result is not None else None
+        environment = case.output.completion.environment
         validation_errors = list(errors)
         if score is None or not math.isfinite(score):
             validation_errors.append("judge_score is missing or not finite")
@@ -276,6 +278,9 @@ def derive_gate(
             scores.append(score)
         if assertion is None:
             validation_errors.append("judge_pass is missing")
+        if environment is not None and not environment.passed:
+            explanation = environment.reason or "no reason was provided"
+            validation_errors.append(f"environment verifier failed: {explanation}")
         reason = None
         if assertion_result is not None:
             reason = assertion_result.reason
@@ -289,6 +294,8 @@ def derive_gate(
                 passed=assertion is True and not validation_errors,
                 score=score,
                 assertion=assertion,
+                environment_passed=(environment.passed if environment is not None else None),
+                environment_reward=(environment.reward if environment is not None else None),
                 reason=reason,
                 errors=tuple(validation_errors),
             )

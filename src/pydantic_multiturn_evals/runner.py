@@ -25,6 +25,7 @@ from pydantic_multiturn_evals.models import (
     ScenarioLimits,
     ScenarioResult,
     SessionContext,
+    SessionOutcome,
     StopDecision,
     TargetTurnEvidence,
     Transcript,
@@ -213,21 +214,47 @@ async def run_scenario(
                     termination=termination,
                 )
                 await services.state_store.save(state)
+                transcript = Transcript(exchanges=exchanges)
+                completion = await before_deadline(
+                    target_session.finish(
+                        SessionOutcome(
+                            transcript=transcript,
+                            decisions=decisions,
+                            termination=termination,
+                        )
+                    )
+                )
                 result = ScenarioResult(
                     run_id=run_id,
                     scenario_id=scenario.id,
                     repeat_index=case_key.repeat_index,
-                    transcript=Transcript(exchanges=exchanges),
+                    transcript=transcript,
                     target_evidence=tuple(evidence),
                     decisions=decisions,
                     termination=termination,
+                    completion=completion,
                 )
-                scenario_span.update(
-                    {
-                        "termination": termination.kind,
-                        "target_turns": len(exchanges),
-                    }
-                )
+                span_output: dict[str, object] = {
+                    "termination": termination.kind,
+                    "target_turns": len(exchanges),
+                }
+                if completion.environment is not None:
+                    environment = completion.environment
+                    span_output.update(
+                        {
+                            "environment_provider": environment.provider,
+                            "environment_passed": environment.passed,
+                            "environment_reward": environment.reward,
+                        }
+                    )
+                    scenario_span.score(
+                        "environment_pass", float(environment.passed), environment.reason
+                    )
+                    if environment.reward is not None:
+                        scenario_span.score(
+                            "environment_reward", environment.reward, environment.reason
+                        )
+                scenario_span.update(span_output)
                 return result
 
     raise RuntimeError("scenario loop exhausted without a terminal result")  # pragma: no cover

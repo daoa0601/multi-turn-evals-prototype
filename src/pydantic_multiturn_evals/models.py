@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints,
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Identifier = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*$")]
 EnvironmentName = Annotated[str, StringConstraints(pattern=r"^[A-Z][A-Z0-9_]*$")]
+TargetKind: TypeAlias = Literal["pydantic_ai", "command", "agentenv"]
+ExecutionKind: TypeAlias = Literal["pydantic_ai", "command", "agentenv", "harbor"]
 
 
 class StrictModel(BaseModel):
@@ -123,6 +125,32 @@ class Transcript(StrictModel):
     exchanges: tuple[Exchange, ...]
 
 
+class SessionOutcome(StrictModel):
+    """Terminal conversation state passed to a target before its resources close."""
+
+    transcript: Transcript
+    decisions: tuple[ActorDecision, ...]
+    termination: Termination
+
+
+class EnvironmentEvidence(StrictModel):
+    """Structured verifier output kept outside the judge transcript."""
+
+    provider: Identifier
+    environment_id: Text | None = None
+    trial_id: Text | None = None
+    verifier: Text
+    passed: bool
+    reward: float | None = Field(default=None, ge=0, le=1)
+    reason: str | None = None
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class TargetCompletion(StrictModel):
+    environment: EnvironmentEvidence | None = None
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+
+
 class ScenarioResult(StrictModel):
     run_id: str
     scenario_id: Identifier
@@ -131,6 +159,7 @@ class ScenarioResult(StrictModel):
     target_evidence: tuple[TargetTurnEvidence, ...] = ()
     decisions: tuple[ActorDecision, ...]
     termination: Termination
+    completion: TargetCompletion = TargetCompletion()
 
 
 class ConversationState(StrictModel):
@@ -262,8 +291,46 @@ class CommandTargetSpec(StrictModel):
         return self
 
 
+class SandboxCommandSpec(StrictModel):
+    argv: tuple[Text, ...] = Field(min_length=1)
+    cwd: str | None = None
+
+
+class AgentEnvCredentials(StrictModel):
+    api_url_env: EnvironmentName = "E2B_API_URL"
+    sandbox_url_env: EnvironmentName = "E2B_SANDBOX_URL"
+    api_key_env: EnvironmentName = "E2B_API_KEY"
+
+
+class AgentEnvLimits(StrictModel):
+    create_seconds: float = Field(default=60, gt=0, le=600)
+    turn_seconds: float = Field(default=120, gt=0, le=1800)
+    verifier_seconds: float = Field(default=120, gt=0, le=1800)
+    destroy_seconds: float = Field(default=20, gt=0, le=120)
+    sandbox_ttl_seconds: int = Field(default=900, ge=60, le=86400)
+    response_bytes: int = Field(default=1024 * 1024, gt=0, le=16 * 1024 * 1024)
+
+
+class AgentEnvTargetSpec(StrictModel):
+    version: Literal[1]
+    name: Identifier
+    kind: Literal["agentenv"]
+    template: Text
+    turn: SandboxCommandSpec
+    verifier: SandboxCommandSpec
+    guest_env: tuple[EnvironmentName, ...] = ()
+    credentials: AgentEnvCredentials = AgentEnvCredentials()
+    limits: AgentEnvLimits = AgentEnvLimits()
+
+    @model_validator(mode="after")
+    def reject_duplicate_environment_names(self) -> AgentEnvTargetSpec:
+        if len(self.guest_env) != len(set(self.guest_env)):
+            raise ValueError("guest_env names must be unique")
+        return self
+
+
 TargetSpec: TypeAlias = Annotated[
-    PydanticAITargetSpec | CommandTargetSpec,
+    PydanticAITargetSpec | CommandTargetSpec | AgentEnvTargetSpec,
     Field(discriminator="kind"),
 ]
 
@@ -283,7 +350,7 @@ class PlannedCase(StrictModel):
 class SessionContext:
     suite_name: str
     target_name: str
-    target_kind: Literal["pydantic_ai", "command"]
+    target_kind: TargetKind
     target_version: int
     key: CaseKey
     run_id: str
@@ -298,6 +365,8 @@ class CaseGate(StrictModel):
     passed: bool
     score: float | None = None
     assertion: bool | None = None
+    environment_passed: bool | None = None
+    environment_reward: float | None = None
     reason: str | None = None
     errors: tuple[str, ...] = ()
 

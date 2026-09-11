@@ -1,0 +1,23 @@
+version: 1
+name: agentenv-example
+kind: agentenv
+template: pydantic-multiturn-eval-v1
+credentials:
+  api_url_env: E2B_API_URL
+  sandbox_url_env: E2B_SANDBOX_URL
+  api_key_env: E2B_API_KEY
+guest_env:
+  - ZAI_API_KEY
+turn:
+  argv: [python, /opt/multiturn/agentenv_turn.py]
+  cwd: /workspace
+verifier:
+  argv: [python, /opt/multiturn/agentenv_verify.py]
+  cwd: /workspace
+limits:
+  create_seconds: 60
+  turn_seconds: 120
+  verifier_seconds: 120
+  destroy_seconds: 20
+  sandbox_ttl_seconds: 900
+  response_bytes: 1048576

@@ -1,4 +1,4 @@
-.PHONY: sync check test validate live
+.PHONY: sync check test validate compat live
 
 sync:
 	uv sync --all-extras
@@ -14,6 +14,9 @@ test:
 
 validate:
 	uv run multiturn-evals validate scenarios/support.yaml --target targets/support.yaml
+
+compat:
+	uv run python scripts/compat_smoke.py offline
 
 live:
 	uv run multiturn-evals compare scenarios/support.yaml --baseline targets/support.yaml --candidate targets/support-candidate.yaml --out outputs/support-ab

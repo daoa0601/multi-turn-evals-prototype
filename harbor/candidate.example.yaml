@@ -1,0 +1,17 @@
+version: 1
+name: harbor-candidate
+kind: harbor
+base_config: base-job.candidate.example.yaml
+task_template: task-template
+command: [uvx, --python, "3.12", --from, "harbor[e2b]==0.22.0", --with, ./harbor_adapter, harbor]
+actor_command: [../.venv/bin/python, -m, pydantic_multiturn_evals.harbor_actor_worker]
+inherit_env:
+  - PATH
+  - HOME
+  - E2B_API_URL
+  - E2B_SANDBOX_URL
+  - E2B_API_KEY
+  - ANTHROPIC_API_KEY
+  - ZAI_API_KEY
+reward_key: reward
+minimum_environment_reward: 1.0

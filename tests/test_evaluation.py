@@ -16,10 +16,13 @@ from pydantic_multiturn_evals.evaluation import evaluate_suite
 from pydantic_multiturn_evals.models import (
     AcceptDecision,
     ActorBrief,
+    EnvironmentEvidence,
     GatePolicy,
     Scenario,
     SessionContext,
+    SessionOutcome,
     SuiteSpec,
+    TargetCompletion,
     TargetFailureEvidence,
     TargetReply,
 )
@@ -36,8 +39,13 @@ class EvalTarget:
     kind: Literal["command"] = "command"
     version = 1
 
-    def __init__(self, reply: Callable[[ConversationView], Awaitable[str]]) -> None:
+    def __init__(
+        self,
+        reply: Callable[[ConversationView], Awaitable[str]],
+        completion: TargetCompletion | None = None,
+    ) -> None:
         self._reply = reply
+        self._completion = completion or TargetCompletion()
 
     @asynccontextmanager
     async def session(self, context: SessionContext) -> AsyncIterator[EvalTarget]:
@@ -45,6 +53,9 @@ class EvalTarget:
 
     async def reply(self, view: ConversationView) -> TargetReply:
         return TargetReply(assistant_text=await self._reply(view))
+
+    async def finish(self, outcome: SessionOutcome) -> TargetCompletion:
+        return self._completion
 
     def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
         return ()
@@ -151,3 +162,40 @@ def test_target_error_becomes_a_failed_pydantic_case() -> None:
 
     assert result.gate.passed is False
     assert result.gate.cases[0].errors == ("RuntimeError: target unavailable for help",)
+
+
+def test_environment_verification_is_a_gate_but_not_judge_input(tmp_path: Path) -> None:
+    judge = RecordingJudge(custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9})
+    target = EvalTarget(
+        helpful_reply,
+        completion=TargetCompletion(
+            environment=EnvironmentEvidence(
+                provider="agentenv",
+                environment_id="sandbox-secret-marker",
+                verifier="tests/verify.py",
+                passed=False,
+                reward=0.25,
+                reason="Expected file was missing.",
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        evaluate_suite(
+            suite(),
+            target=target,
+            actor=AcceptingActor(),
+            judge_model=judge,
+            progress=False,
+        )
+    )
+    result.write_artifacts(tmp_path)
+
+    case = result.gate.cases[0]
+    assert case.passed is False
+    assert case.environment_passed is False
+    assert case.environment_reward == 0.25
+    assert case.errors == ("environment verifier failed: Expected file was missing.",)
+    assert "sandbox-secret-marker" not in repr(judge.requests)
+    evidence = json.loads((tmp_path / "evidence.jsonl").read_text())
+    assert evidence["completion"]["environment"]["environment_id"] == "sandbox-secret-marker"

@@ -12,6 +12,8 @@ from pydantic_multiturn_evals.models import (
     Scenario,
     ScenarioLimits,
     SessionContext,
+    SessionOutcome,
+    TargetCompletion,
     TargetFailureEvidence,
     TargetReply,
     TurnLimitReached,
@@ -43,14 +45,23 @@ class ScriptedTarget:
     def __init__(self, *replies: str) -> None:
         self.replies = list(replies)
         self.views: list[ConversationView] = []
+        self.events: list[str] = []
 
     @asynccontextmanager
     async def session(self, context: SessionContext) -> AsyncIterator[ScriptedTarget]:
-        yield self
+        try:
+            yield self
+        finally:
+            self.events.append("exit")
 
     async def reply(self, view: ConversationView) -> TargetReply:
+        self.events.append("reply")
         self.views.append(view)
         return TargetReply(assistant_text=self.replies.pop(0))
+
+    async def finish(self, outcome: SessionOutcome) -> TargetCompletion:
+        self.events.append(f"finish:{outcome.termination.kind}")
+        return TargetCompletion(details={"finished": True})
 
     def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
         return ()
@@ -99,6 +110,8 @@ def test_actor_adapts_the_second_turn_to_the_first_reply() -> None:
     final_state = asyncio.run(store.load(result.run_id))
     assert final_state is not None
     assert final_state.termination == result.termination
+    assert result.completion.details == {"finished": True}
+    assert target.events == ["reply", "reply", "finish:actor_accepted", "exit"]
 
 
 def test_continue_at_the_hard_limit_cannot_create_a_dangling_turn() -> None:

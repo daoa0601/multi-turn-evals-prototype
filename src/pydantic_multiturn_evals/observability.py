@@ -10,18 +10,22 @@ from typing import Any, Literal, Protocol
 
 from pydantic_ai import Agent
 
+from pydantic_multiturn_evals.models import ExecutionKind
+
 
 @dataclass(frozen=True, slots=True)
 class TraceFields:
     suite: str
     target: str | None = None
-    harness: Literal["pydantic_ai", "command"] | None = None
+    harness: ExecutionKind | None = None
     comparison_id: str | None = None
     arm: Literal["baseline", "candidate"] | None = None
     scenario_id: str | None = None
     repeat_index: int | None = None
     run_id: str | None = None
     turn_index: int | None = None
+    harbor_job_id: str | None = None
+    harbor_trial_id: str | None = None
     version: str | None = None
 
     def metadata(self) -> dict[str, str | int]:
@@ -37,6 +41,8 @@ class TraceFields:
                 "repeat_index": self.repeat_index,
                 "run_id": self.run_id,
                 "turn_index": self.turn_index,
+                "harbor_job_id": self.harbor_job_id,
+                "harbor_trial_id": self.harbor_trial_id,
             }.items()
             if value is not None
         }

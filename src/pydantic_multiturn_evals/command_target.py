@@ -12,32 +12,28 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, JsonValue, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from pydantic_multiturn_evals.models import (
     CommandTargetSpec,
     ConversationView,
     SessionContext,
-    StrictModel,
+    SessionOutcome,
+    TargetCompletion,
     TargetFailureEvidence,
     TargetReply,
-    Text,
+)
+from pydantic_multiturn_evals.protocol import (
+    CloseRequest,
+    FinishedResponse,
+    FinishRequest,
+    ReadyResponse,
+    ReplyResponse,
+    StartRequest,
+    TurnRequest,
+    WireSession,
 )
 from pydantic_multiturn_evals.targets import TargetSession
-
-
-class _Ready(StrictModel):
-    protocol: Literal[1]
-    type: Literal["ready"]
-
-
-class _Reply(StrictModel):
-    protocol: Literal[1]
-    type: Literal["reply"]
-    id: int = Field(ge=1)
-    assistant_text: Text
-    session_id: str | None = None
-    evidence: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class CommandTarget:
@@ -82,6 +78,7 @@ class _CommandSession:
         self._stderr_truncated = False
         self._turn = 0
         self._closed = False
+        self._finished = False
 
     async def start(self) -> None:
         cwd = self._spec.cwd
@@ -104,41 +101,30 @@ class _CommandSession:
         )
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         await self._write(
-            {
-                "protocol": 1,
-                "type": "start",
-                "session": {
-                    "comparison_id": self._context.comparison_id,
-                    "arm": self._context.arm,
-                    "suite": self._context.suite_name,
-                    "target": self._context.target_name,
-                    "scenario_id": self._context.key.scenario_id,
-                    "repeat_index": self._context.key.repeat_index,
-                    "run_id": self._context.run_id,
-                },
-            }
+            StartRequest(
+                session=WireSession(
+                    comparison_id=self._context.comparison_id,
+                    arm=self._context.arm,
+                    suite=self._context.suite_name,
+                    target=self._context.target_name,
+                    scenario_id=self._context.key.scenario_id,
+                    repeat_index=self._context.key.repeat_index,
+                    run_id=self._context.run_id,
+                )
+            )
         )
         payload = await self._read_payload(self._spec.limits.startup_seconds)
         try:
-            _Ready.model_validate(payload)
+            ReadyResponse.model_validate(payload)
         except ValidationError as error:
             raise RuntimeError(f"command target sent an invalid ready message: {error}") from error
 
     async def reply(self, view: ConversationView) -> TargetReply:
         self._turn += 1
-        await self._write(
-            {
-                "protocol": 1,
-                "type": "turn",
-                "id": self._turn,
-                "messages": [
-                    {"role": message.role, "content": message.content} for message in view.messages
-                ],
-            }
-        )
+        await self._write(TurnRequest(id=self._turn, messages=view.messages))
         payload = await self._read_payload(self._spec.limits.turn_seconds)
         try:
-            response = _Reply.model_validate(payload)
+            response = ReplyResponse.model_validate(payload)
         except ValidationError as error:
             raise RuntimeError(f"command target sent an invalid reply: {error}") from error
         if response.id != self._turn:
@@ -150,6 +136,20 @@ class _CommandSession:
             session_id=response.session_id,
             evidence=response.evidence,
         )
+
+    async def finish(self, outcome: SessionOutcome) -> TargetCompletion:
+        if self._finished:
+            raise RuntimeError("command target session was already finished")
+        self._finished = True
+        await self._write(FinishRequest(outcome=outcome))
+        payload = await self._read_payload(self._spec.limits.turn_seconds)
+        try:
+            response = FinishedResponse.model_validate(payload)
+        except ValidationError as error:
+            raise RuntimeError(
+                f"command target sent an invalid finished message: {error}"
+            ) from error
+        return response.completion
 
     async def close(self, *, check_exit: bool) -> None:
         if self._closed:
@@ -180,7 +180,7 @@ class _CommandSession:
             return
         if process.returncode is None:
             with suppress(BrokenPipeError, ConnectionResetError):
-                await self._write({"protocol": 1, "type": "close"})
+                await self._write(CloseRequest())
             if process.stdin is not None:
                 process.stdin.close()
             try:
@@ -204,13 +204,13 @@ class _CommandSession:
         if check_exit and process.returncode != 0:
             raise self._exit_error(process.returncode)
 
-    async def _write(self, payload: dict[str, object]) -> None:
+    async def _write(self, payload: BaseModel) -> None:
         process = self._require_process()
         if process.stdin is None:
             raise RuntimeError("command target stdin is unavailable")
         if process.returncode is not None:
             raise self._exit_error(process.returncode)
-        process.stdin.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+        process.stdin.write((payload.model_dump_json() + "\n").encode())
         try:
             await process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError) as error:
