@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,12 @@ for raw_line in sys.stdin:
         send({"protocol": protocol, "type": "ready"})
         continue
     if request["type"] == "finish":
+        if mode == "descendant-stderr":
+            child_pid = os.fork()
+            if child_pid == 0:
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                time.sleep(2)
+                os._exit(0)
         send(
             {
                 "protocol": 2,
@@ -31,6 +38,8 @@ for raw_line in sys.stdin:
                 "completion": {"details": {"adapter_finished": True}},
             }
         )
+        if mode == "descendant-stderr":
+            raise SystemExit(0)
         continue
     if request["type"] == "close":
         break

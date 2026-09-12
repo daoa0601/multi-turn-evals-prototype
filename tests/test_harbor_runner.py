@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
+import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from pydantic_ai.models.test import TestModel
 
 from pydantic_multiturn_evals.harbor_runner import (
     HarborArmSpec,
     HarborBackend,
+    HarborCliBackend,
     HarborJobPlan,
     HarborJobReceipt,
+    HarborLimits,
     HarborTrialReceipt,
     LoadedHarborArm,
     compare_harbor_suite,
@@ -160,8 +166,14 @@ def test_harbor_task_compiler_is_stable_and_removes_stale_tasks(tmp_path: Path) 
         arm="baseline",
     )
 
-    assert [case.task_name for case in cases] == ["help--r0001", "help--r0002"]
-    assert [case.task_name for case in rerun] == ["help--r0001", "help--r0002"]
+    assert [case.task_name for case in cases] == [
+        "pydantic-multiturn-evals/help--r0001",
+        "pydantic-multiturn-evals/help--r0002",
+    ]
+    assert [case.task_name for case in rerun] == [
+        "pydantic-multiturn-evals/help--r0001",
+        "pydantic-multiturn-evals/help--r0002",
+    ]
     assert not (destination / "stale").exists()
     instruction = (destination / "help--r0001" / "instruction.md").read_text()
     assert '"first_prompt":"Help me."' in instruction
@@ -210,3 +222,53 @@ def test_harbor_runs_two_jobs_and_combines_verifier_with_judge(
     )
     assert evidence["completion"]["environment"]["provider"] == "harbor"
     assert (tmp_path / "output" / "candidate" / "harbor" / "result.json").exists()
+
+
+def test_cancelling_harbor_reaps_its_process_group(tmp_path: Path, monkeypatch: Any) -> None:
+    pid_file = tmp_path / "harbor.pid"
+    monkeypatch.setenv("HARBOR_TEST_PID_FILE", str(pid_file))
+    sleeper = (
+        "import os,time; from pathlib import Path; "
+        "Path(os.environ['HARBOR_TEST_PID_FILE']).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    spec = HarborArmSpec(
+        version=1,
+        name="cancel-test",
+        kind="harbor",
+        base_config=tmp_path / "unused-job.yaml",
+        task_template=tmp_path / "unused-template",
+        command=(sys.executable, "-c", sleeper),
+        actor_command=(sys.executable, "-c", "pass"),
+        inherit_env=("HARBOR_TEST_PID_FILE",),
+        limits=HarborLimits(job_seconds=60),
+    )
+    plan = HarborJobPlan(
+        comparison_id="comparison",
+        role="baseline",
+        arm_name="cancel-test",
+        config_path=tmp_path / "job.yaml",
+        job_dir=tmp_path / "jobs" / "cancel-test",
+        cases=(),
+        max_concurrency=1,
+    )
+
+    async def exercise() -> bool:
+        task = asyncio.create_task(HarborCliBackend(spec, tmp_path).run_job(plan))
+        for _ in range(100):
+            if pid_file.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert pid_file.exists()
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        os.killpg(pid, signal.SIGKILL)
+        return True
+
+    assert asyncio.run(exercise()) is False

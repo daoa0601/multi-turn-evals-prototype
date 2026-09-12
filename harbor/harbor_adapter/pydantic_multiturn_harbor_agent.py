@@ -51,6 +51,26 @@ class PydanticAdaptiveUserAgent(BaseAgent):
         context: AgentContext,
     ) -> None:
         case = parse_case(instruction)
+        limits = required_mapping(case, "limits")
+        timeout_seconds = required_positive_number(limits, "timeout_seconds")
+        try:
+            await asyncio.wait_for(
+                self._run_case(case, environment, context),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError as error:
+            scenario = required_mapping(case, "scenario")
+            scenario_id = required_string(scenario, "id")
+            raise RuntimeError(
+                f"scenario {scenario_id!r} exceeded {timeout_seconds:g} seconds"
+            ) from error
+
+    async def _run_case(
+        self,
+        case: dict[str, object],
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
         scenario = required_mapping(case, "scenario")
         limits = required_mapping(case, "limits")
         exchanges: list[dict[str, object]] = []
@@ -218,6 +238,13 @@ def required_positive_integer(value: dict[str, object], key: str) -> int:
     if not isinstance(result, int) or isinstance(result, bool) or result < 1:
         raise ValueError(f"Harbor case field {key!r} must be a positive integer")
     return result
+
+
+def required_positive_number(value: dict[str, object], key: str) -> float:
+    result = value.get(key)
+    if not isinstance(result, int | float) or isinstance(result, bool) or result <= 0:
+        raise ValueError(f"Harbor case field {key!r} must be a positive number")
+    return float(result)
 
 
 async def read_bounded(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]:

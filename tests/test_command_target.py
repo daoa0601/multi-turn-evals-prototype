@@ -144,6 +144,24 @@ def test_stderr_is_drained_and_failure_text_stays_out_of_the_exception() -> None
     asyncio.run(exercise())
 
 
+def test_shutdown_bound_includes_descendants_holding_stderr() -> None:
+    async def exercise() -> float:
+        target = command_target(mode="descendant-stderr")
+        started = asyncio.get_running_loop().time()
+        async with target.session(context()) as session:
+            await session.finish(
+                SessionOutcome(
+                    transcript=Transcript(exchanges=()),
+                    decisions=(),
+                    termination=TurnLimitReached(limit=1),
+                )
+            )
+            await asyncio.sleep(0.05)
+        return asyncio.get_running_loop().time() - started
+
+    assert asyncio.run(exercise()) < 0.8
+
+
 def test_cancelling_a_turn_reaps_the_process(tmp_path: Path) -> None:
     async def exercise() -> int:
         pid_file = tmp_path / "pid"

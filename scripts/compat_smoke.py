@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -87,6 +88,44 @@ def offline_smoke() -> int:
         )
         if [case.task_name for case in first] != [case.task_name for case in second]:
             raise RuntimeError("Harbor task compilation was not stable")
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "--python",
+                "3.12",
+                "--isolated",
+                "--with",
+                "harbor[e2b]==0.22.0",
+                "python",
+                str(ROOT / "scripts" / "validate_harbor_tasks.py"),
+                *(str(case.task_path) for case in second),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "--python",
+                "3.12",
+                "--isolated",
+                "--with",
+                "harbor[e2b]==0.22.0",
+                "--with",
+                str(ROOT / "harbor" / "harbor_adapter"),
+                "--with",
+                "pytest",
+                "python",
+                "-m",
+                "pytest",
+                "-q",
+                str(ROOT / "harbor" / "harbor_adapter" / "test_pydantic_multiturn_harbor_agent.py"),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
         plans = [
             prepare_harbor_job(
                 suite,

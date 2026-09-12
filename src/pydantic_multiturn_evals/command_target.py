@@ -194,13 +194,21 @@ class _CommandSession:
                 except TimeoutError:
                     self._signal_process_group(signal.SIGKILL)
                     await process.wait()
-        else:
-            await process.wait()
-        if self._stderr_task is not None:
-            await self._stderr_task
         self._signal_process_group(signal.SIGTERM)
         await asyncio.sleep(0)
         self._signal_process_group(signal.SIGKILL)
+        if process.returncode is None:
+            await process.wait()
+        if self._stderr_task is not None:
+            try:
+                await asyncio.wait_for(
+                    self._stderr_task,
+                    timeout=self._spec.limits.shutdown_seconds,
+                )
+            except TimeoutError:
+                self._stderr_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._stderr_task
         if check_exit and process.returncode != 0:
             raise self._exit_error(process.returncode)
 
@@ -259,7 +267,7 @@ class _CommandSession:
 
     def _signal_process_group(self, sig: signal.Signals) -> None:
         process = self._require_process()
-        with suppress(ProcessLookupError):
+        with suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, sig)
 
     def _require_process(self) -> asyncio.subprocess.Process:

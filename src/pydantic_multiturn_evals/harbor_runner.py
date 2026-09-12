@@ -289,10 +289,11 @@ def compile_harbor_tasks(
     compiled: list[CompiledHarborCase] = []
     try:
         for item in planned:
-            task_name = f"{item.key.scenario_id}--r{item.key.repeat_index:04d}"
-            task_path = temporary / task_name
+            directory_name = f"{item.key.scenario_id}--r{item.key.repeat_index:04d}"
+            task_name = f"pydantic-multiturn-evals/{directory_name}"
+            task_path = temporary / directory_name
             shutil.copytree(task_template, task_path)
-            run_id = f"{comparison_id}-{arm}-{task_name}"
+            run_id = f"{comparison_id}-{arm}-{directory_name}"
             envelope = {
                 "schema_version": 1,
                 "run_id": run_id,
@@ -315,7 +316,7 @@ def compile_harbor_tasks(
                     key=item.key,
                     case_name=item.case_name,
                     task_name=task_name,
-                    task_path=destination / task_name,
+                    task_path=destination / directory_name,
                     scenario=item.scenario,
                 )
             )
@@ -422,16 +423,19 @@ class HarborCliBackend:  # pragma: no cover - exercised by the opt-in Harbor smo
         try:
             await asyncio.wait_for(process.wait(), timeout=self._spec.limits.job_seconds)
         except TimeoutError as error:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(process.wait(), timeout=10)
-            except TimeoutError:
-                os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
+            await _stop_process_group(process)
             await stderr_task
             raise RuntimeError(
                 f"Harbor job exceeded {self._spec.limits.job_seconds:g} seconds"
             ) from error
+        except asyncio.CancelledError:
+            cleanup = asyncio.create_task(_stop_process_group(process))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+            await stderr_task
+            raise
         stderr, truncated = await stderr_task
         if process.returncode != 0:
             suffix = " (truncated)" if truncated else ""
@@ -646,6 +650,21 @@ async def _drain_bounded(stream: asyncio.StreamReader | None, limit: int) -> tup
         if len(chunk) > remaining:
             truncated = True
     return bytes(captured), truncated
+
+
+async def _stop_process_group(process: asyncio.subprocess.Process) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except TimeoutError:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        await process.wait()
 
 
 def _best_effort_task_name(result_path: Path) -> str | None:
