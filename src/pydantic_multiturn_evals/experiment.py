@@ -154,7 +154,6 @@ class ContainerExecution(StrictModel):
 
 class AgentEnvExecution(StrictModel):
     kind: Literal["agentenv"]
-    region: Text | None = None
 
 
 ExecutionSpec: TypeAlias = Annotated[
@@ -945,6 +944,14 @@ def _expand_arms(spec: ExperimentSpec, issues: list[_Issue]) -> tuple[ArmSpec, .
             f"design.axes.{axis}",
             "a matrix axis needs at least one value",
         )
+    for axis, values in spec.design.axes.items():
+        if len(values) != len(set(values)):
+            _issue(
+                issues,
+                "DUPLICATE_MATRIX_VALUE",
+                f"design.axes.{axis}",
+                "matrix axis values must be unique",
+            )
     ordered_axes: list[AxisName] = [axis for axis in _AXIS_ORDER if axis in spec.design.axes]
     arm_count = 0 if empty_axes else _product(len(spec.design.axes[axis]) for axis in ordered_axes)
     if arm_count > spec.bounds.max_arms:
@@ -973,6 +980,14 @@ def _expand_arms(spec: ExperimentSpec, issues: list[_Issue]) -> tuple[ArmSpec, .
                 name="--".join(name_parts),
                 select=ArmSelection.model_validate(selection),
             )
+        )
+    names = [arm.name for arm in arms]
+    if len(names) != len(set(names)):
+        _issue(
+            issues,
+            "DUPLICATE_ARM_NAME",
+            "design.axes",
+            "matrix expansion produced duplicate arm names",
         )
     return tuple(arms)
 

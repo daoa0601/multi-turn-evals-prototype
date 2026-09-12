@@ -98,6 +98,22 @@ def test_matrix_expansion_is_deterministic_and_stops_above_the_arm_bound(tmp_pat
         compile_experiment(load_experiment(experiment_path))
 
 
+def test_matrix_rejects_duplicate_values_before_arm_keys_can_collide(tmp_path: Path) -> None:
+    experiment = yaml.safe_load((ROOT / "experiments" / "support-ab.yaml").read_text())
+    experiment["corpus"] = str((ROOT / "corpora" / "support.yaml").resolve())
+    experiment["catalog"] = str((ROOT / "components" / "support.yaml").resolve())
+    experiment["design"] = {
+        "kind": "matrix",
+        "axes": {"actor": ["patient-user", "patient-user"]},
+        "comparisons": [],
+    }
+    path = tmp_path / "duplicate-matrix.yaml"
+    path.write_text(yaml.safe_dump(experiment), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"\[DUPLICATE_MATRIX_VALUE\] design.axes.actor"):
+        compile_experiment(path)
+
+
 def test_static_compilation_collects_reference_and_selection_issues(tmp_path: Path) -> None:
     experiment = yaml.safe_load((ROOT / "experiments" / "support-ab.yaml").read_text())
     catalog = yaml.safe_load((ROOT / "components" / "support.yaml").read_text())
