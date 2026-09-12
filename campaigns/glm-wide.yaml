@@ -1,0 +1,43 @@
+version: 1
+name: glm-wide
+suite: ../scenarios/glm-wide.yaml
+repeat: 1
+bounds:
+  max_cases: 60
+  max_concurrency: 4
+  run_seconds: 3600
+  max_model_requests: 900
+  max_output_tokens: 650000
+  judge_requests_per_case: 2
+lanes:
+  - name: direct-glm
+    revision: v1
+    execution_environment: in-process
+    target: ../targets/glm-wide.yaml
+    interaction: simulated
+    required_env: [ZAI_API_KEY]
+    target_requests_per_turn: 2
+    target_max_output_tokens: 900
+  - name: command-glm
+    revision: v1
+    execution_environment: local-process
+    target: ../targets/glm-wide-command.yaml
+    interaction: real
+    required_env: [ZAI_API_KEY]
+    target_requests_per_turn: 2
+    target_max_output_tokens: 900
+  - name: docker-glm
+    revision: v1
+    execution_environment: docker-container
+    target: ../targets/glm-wide-docker.yaml
+    interaction: real
+    required_env: [ZAI_API_KEY]
+    target_requests_per_turn: 2
+    target_max_output_tokens: 900
+excluded_lanes:
+  - name: agentenv-glm
+    execution_environment: agentenv
+    reason: The AgentENV endpoint credentials and immutable GLM template are not configured.
+  - name: harbor-glm
+    execution_environment: harbor
+    reason: The Harbor ACP target and remote environment credentials are not configured.

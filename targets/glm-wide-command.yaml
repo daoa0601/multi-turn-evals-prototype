@@ -1,0 +1,12 @@
+version: 1
+name: glm-wide-command
+kind: command
+argv: [.venv/bin/python, examples/glm_jsonl_harness.py]
+cwd: ..
+inherit_env: [PATH, ZAI_API_KEY]
+limits:
+  startup_seconds: 15
+  turn_seconds: 100
+  shutdown_seconds: 3
+  stdout_bytes_per_message: 1048576
+  stderr_bytes_per_session: 65536

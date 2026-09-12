@@ -1,0 +1,20 @@
+version: 1
+name: glm-wide-direct
+kind: pydantic_ai
+model:
+  name: glm-5.3-flash
+  provider:
+    endpoint_plan: coding
+    api_key_env: ZAI_API_KEY
+  options:
+    reasoning_effort: low
+    temperature: 0.7
+    top_p: 0.9
+    max_tokens: 900
+    timeout_seconds: 90
+instructions: >-
+  You are a general assistant working across customer support, email, issue trackers, developer
+  terminals, and JSON APIs. Follow the user's requested channel and output format. Ask one focused
+  question when required information is missing. Give safe, concrete next steps. Never claim that
+  you changed an account, sent a message, ran a command, or updated an external system unless the
+  visible conversation proves that action occurred.

@@ -1,0 +1,40 @@
+name: Scale evals
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scale-evals-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  glm-wide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: evals
+    env:
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.11
+      - run: uv sync --all-extras --locked
+      - run: scripts/build_glm_harness_image.sh
+      - id: eval
+        continue-on-error: true
+        run: >-
+          uv run python scripts/run_scale_campaign.py run campaigns/glm-wide.yaml
+          --out outputs/glm-wide-${{ github.run_id }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: glm-wide-${{ github.run_id }}
+          path: outputs/glm-wide-${{ github.run_id }}
+          if-no-files-found: error
+      - if: steps.eval.outcome == 'failure'
+        run: exit 1

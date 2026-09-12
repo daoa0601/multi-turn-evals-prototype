@@ -1,0 +1,20 @@
+version: 1
+name: glm-wide-docker
+kind: command
+argv:
+  - docker
+  - run
+  - --rm
+  - --init
+  - --interactive
+  - --env
+  - ZAI_API_KEY
+  - pydantic-multiturn-evals-glm:local
+cwd: ..
+inherit_env: [PATH, ZAI_API_KEY]
+limits:
+  startup_seconds: 30
+  turn_seconds: 120
+  shutdown_seconds: 10
+  stdout_bytes_per_message: 1048576
+  stderr_bytes_per_session: 65536

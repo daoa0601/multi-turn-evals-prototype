@@ -60,6 +60,42 @@ uv run multiturn-evals run scenarios/support.yaml \
   --out outputs/support
 ```
 
+## Run the broad GLM campaign
+
+[`campaigns/glm-wide.yaml`](campaigns/glm-wide.yaml) expands 20 adaptive scenarios across web chat,
+email, ticket, CLI, and API response modes. The scenarios cover 19 task types and nine operating
+contexts. The checked-in lanes run `glm-5.3-flash` directly through Pydantic AI, through one local
+JSONL child process per case, and through the same JSONL contract in a Docker container. Build the
+container lane before running the campaign:
+
+```console
+scripts/build_glm_harness_image.sh
+```
+
+Inspect the resolved plan before making model calls:
+
+```console
+uv run python scripts/run_scale_campaign.py plan campaigns/glm-wide.yaml \
+  --out outputs/glm-wide-plan
+```
+
+Run the campaign or resume its saved plan:
+
+```console
+uv run python scripts/run_scale_campaign.py run campaigns/glm-wide.yaml \
+  --out outputs/glm-wide
+uv run python scripts/run_scale_campaign.py resume outputs/glm-wide
+```
+
+Each case writes its evaluation artifacts and a terminal receipt before the coordinator marks it
+complete. Resume skips completed and failed cases. It marks a previously started case as interrupted
+instead of replaying possible external side effects. The plan also records unavailable lanes and the
+reason each lane was excluded. See [the campaign design](docs/scale-campaign.md) for the data and
+recovery contract.
+
+The manual [`Scale evals`](.github/workflows/scale-evals.yml) workflow runs the same campaign and
+uploads the complete run directory even when the quality gate fails.
+
 ## Plug in another CLI harness
 
 [`targets/command-example.yaml`](targets/command-example.yaml) shows the command target format. `argv`
