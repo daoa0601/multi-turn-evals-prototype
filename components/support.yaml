@@ -114,7 +114,7 @@ harnesses:
 executions:
   local: {kind: host, workspace_mode: shared}
   isolated-local: {kind: host, workspace_mode: fresh}
-  container: {kind: container, image: pydantic-multiturn-evals:local}
+  container: {kind: container, image: pydantic-multiturn-evals-glm:local}
   agentenv-remote: {kind: agentenv}
 
 limits:

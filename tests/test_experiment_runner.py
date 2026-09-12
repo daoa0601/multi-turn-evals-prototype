@@ -197,6 +197,7 @@ def test_default_executor_runs_target_actor_judge_and_observer_from_the_arm(
     summary = asyncio.run(execute_experiment(experiment, output))
 
     assert summary.completed == 1
+    assert summary.task_failed == 0
     result_path = output / "cases" / "000001-harness-cancel-account-r0001"
     receipt = ExperimentCaseResult.model_validate_json(
         (result_path / "complete.json").read_text(encoding="utf-8")

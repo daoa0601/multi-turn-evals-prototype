@@ -59,6 +59,8 @@ class ExperimentCaseResult(StrictModel):
     score: float | None = None
     run_id: str | None = None
     duration_seconds: float = Field(ge=0)
+    task_failed: bool = False
+    errors: tuple[str, ...] = ()
     trajectory_status: Literal["complete", "partial", "skipped"] | None = None
     requested_models: tuple[RequestedModel, ...] = ()
 
@@ -69,6 +71,7 @@ class ArmRunSummary(StrictModel):
     planned: int
     completed: int
     quality_passed: int
+    task_failed: int
     execution_failed: int
     interrupted: int
     running: int
@@ -100,6 +103,7 @@ class ExperimentSummary(StrictModel):
     planned: int
     completed: int
     quality_passed: int
+    task_failed: int
     execution_failed: int
     interrupted: int
     running: int
@@ -246,6 +250,7 @@ def summarize_experiment(plan: ExperimentPlan, directory: Path) -> ExperimentSum
         planned=len(state_by_key),
         completed=sum(state == "complete" for state in state_by_key.values()),
         quality_passed=sum(result.passed for result in completed.values()),
+        task_failed=sum(_is_task_failure(result) for result in completed.values()),
         execution_failed=sum(state == "failure" for state in state_by_key.values()),
         interrupted=sum(state == "interrupted" for state in state_by_key.values()),
         running=sum(state == "running" for state in state_by_key.values()),
@@ -379,6 +384,8 @@ async def _execute_case(
         score=gate.score,
         run_id=run_id,
         duration_seconds=perf_counter() - started,
+        task_failed=bool(result.report.failures),
+        errors=gate.errors,
         trajectory_status=(
             result.trajectories[0].assessment.status if result.trajectories else None
         ),
@@ -524,6 +531,7 @@ def _summarize_arm(
     results = [completed[key] for key in keys if key in completed]
     scores = [result.score for result in results if result.score is not None]
     quality_passed = sum(result.passed for result in results)
+    task_failed = sum(_is_task_failure(result) for result in results)
     case_pass_rate = quality_passed / len(results) if results else 0.0
     mean_score = fmean(scores) if scores else 0.0
     counts = {state: sum(states[key] == state for key in keys) for state in set(states.values())}
@@ -541,6 +549,7 @@ def _summarize_arm(
         planned=len(keys),
         completed=len(results),
         quality_passed=quality_passed,
+        task_failed=task_failed,
         execution_failed=counts.get("failure", 0),
         interrupted=counts.get("interrupted", 0),
         running=counts.get("running", 0),
@@ -548,6 +557,12 @@ def _summarize_arm(
         case_pass_rate=case_pass_rate,
         mean_score=mean_score,
     )
+
+
+def _is_task_failure(result: ExperimentCaseResult) -> bool:
+    if result.task_failed:
+        return True
+    return not result.passed and result.run_id is None and result.score is None
 
 
 def _summarize_comparison(

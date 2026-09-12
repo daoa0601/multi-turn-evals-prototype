@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import shutil
 import sys
 from collections.abc import Sequence
@@ -13,6 +14,7 @@ from pydantic_multiturn_evals.comparison import compare_suite
 from pydantic_multiturn_evals.evaluation import evaluate_suite
 from pydantic_multiturn_evals.experiment import compile_experiment
 from pydantic_multiturn_evals.experiment_runner import (
+    ExperimentSummary,
     execute_experiment,
     experiment_lock,
     load_saved_experiment,
@@ -182,8 +184,34 @@ def _run_experiment(args: argparse.Namespace) -> int:
         plan = load_saved_experiment(output)
         preflight_experiment(plan)
         summary = asyncio.run(execute_experiment(plan, output))
-    print(summary.model_dump_json(indent=2))
+    print(json.dumps(_experiment_console_summary(summary), indent=2))
     return 0 if summary.passed else 1
+
+
+def _experiment_console_summary(summary: ExperimentSummary) -> dict[str, object]:
+    return {
+        "experiment": summary.experiment,
+        "passed": summary.passed,
+        "planned": summary.planned,
+        "completed": summary.completed,
+        "quality_passed": summary.quality_passed,
+        "task_failed": summary.task_failed,
+        "execution_failed": summary.execution_failed,
+        "interrupted": summary.interrupted,
+        "pending": summary.pending,
+        "arms": [arm.model_dump(mode="json") for arm in summary.arms],
+        "comparisons": [
+            {
+                "name": comparison.name,
+                "complete": comparison.complete,
+                "mean_score_delta_candidate_minus_baseline": (
+                    comparison.mean_score_delta_candidate_minus_baseline
+                ),
+                "pair_count": len(comparison.pairs),
+            }
+            for comparison in summary.comparisons
+        ],
+    }
 
 
 def _harbor_compare(args: argparse.Namespace) -> int:
