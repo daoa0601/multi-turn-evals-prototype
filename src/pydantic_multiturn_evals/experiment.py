@@ -12,8 +12,12 @@ from typing import Annotated, Literal, TypeAlias, TypeVar, cast
 import yaml
 from pydantic import Field, JsonValue, ValidationError, model_validator
 
+from pydantic_multiturn_evals.model_bindings import required_environment
 from pydantic_multiturn_evals.models import (
     ActorSpec,
+    AgentEnvTargetSpec,
+    CommandTargetSpec,
+    EnvironmentName,
     GatePolicy,
     Identifier,
     JudgeSpec,
@@ -90,27 +94,8 @@ class ObserverComponent(StrictModel):
     model: Identifier
 
 
-class PydanticAITargetComponent(StrictModel):
-    kind: Literal["pydantic_ai"]
+class TargetComponent(StrictModel):
     model: Identifier
-
-
-class CommandTargetComponent(StrictModel):
-    kind: Literal["command"]
-    path: Path
-    max_output_tokens_per_turn: int = Field(ge=1, le=131_072)
-
-
-class AgentEnvTargetComponent(StrictModel):
-    kind: Literal["agentenv"]
-    path: Path
-    max_output_tokens_per_turn: int = Field(ge=1, le=131_072)
-
-
-TargetComponent: TypeAlias = Annotated[
-    PydanticAITargetComponent | CommandTargetComponent | AgentEnvTargetComponent,
-    Field(discriminator="kind"),
-]
 
 
 class PromptComponent(StrictModel):
@@ -138,11 +123,15 @@ class PydanticAIHarness(StrictModel):
 class CommandHarness(StrictModel):
     kind: Literal["command"]
     protocol_version: Literal[2] = 2
+    path: Path
+    environment: tuple[EnvironmentName, ...] = ("PATH",)
 
 
 class AgentEnvHarness(StrictModel):
     kind: Literal["agentenv"]
     protocol_version: Literal[1] = 1
+    path: Path
+    guest_environment: tuple[EnvironmentName, ...] = ()
 
 
 HarnessSpec: TypeAlias = Annotated[
@@ -364,6 +353,7 @@ class SessionArmPlan(StrictModel):
     choices: ArmChoices
     suite: SuiteSpec
     observer_model: ModelSpec
+    target_model: ModelSpec
     target: TargetSpec
     target_max_output_tokens_per_turn: int = Field(ge=1)
     prompts: ResolvedPrompts
@@ -441,12 +431,11 @@ def compile_experiment(source: str | Path | LoadedExperiment) -> ExperimentPlan:
     authored_arms = _expand_arms(loaded.spec, issues)
     arm_plans: list[SessionArmPlan] = []
     arm_names = {arm.name for arm in authored_arms}
-    target_cache: dict[str, TargetSpec] = {}
     for index, arm in enumerate(authored_arms):
         path = f"design.arms[{index}].select"
         _validate_selection_refs(arm.select, loaded.catalog, path, issues)
         choices = _apply_selection(loaded.spec.defaults, arm.select)
-        plan = _compile_arm(loaded, arm.name, choices, path, issues, target_cache)
+        plan = _compile_arm(loaded, arm.name, choices, path, issues)
         if plan is not None:
             arm_plans.append(plan)
 
@@ -476,7 +465,6 @@ def _compile_arm(
     choices: ArmChoices,
     path: str,
     issues: list[_Issue],
-    target_cache: dict[str, TargetSpec],
 ) -> SessionArmPlan | None:
     catalog = loaded.catalog
     resolved = _resolve_arm_components(catalog, choices)
@@ -495,7 +483,7 @@ def _compile_arm(
         limits,
     ) = resolved
     _validate_prompt_roles(choices, prompts, path, issues)
-    _validate_compatibility(target_component.kind, harness.kind, execution.kind, path, issues)
+    _validate_compatibility(harness, execution, path, issues)
     scenarios = _select_cases(loaded.corpus, selector, choices.tasks, issues)
     if not scenarios:
         return None
@@ -503,10 +491,10 @@ def _compile_arm(
     target = _resolve_target(
         choices.target,
         target_component,
+        harness,
         prompts.target,
         catalog,
         loaded.catalog_source.parent,
-        target_cache,
         path,
         issues,
     )
@@ -556,12 +544,11 @@ def _compile_arm(
         choices=choices,
         suite=suite,
         observer_model=catalog.models[observer.model],
+        target_model=catalog.models[target_component.model],
         target=target,
-        target_max_output_tokens_per_turn=(
-            catalog.models[target_component.model].options.max_tokens
-            if isinstance(target_component, PydanticAITargetComponent)
-            else target_component.max_output_tokens_per_turn
-        ),
+        target_max_output_tokens_per_turn=catalog.models[
+            target_component.model
+        ].options.max_tokens,
         prompts=prompts,
         fixture=ResolvedFixture(
             name=choices.fixture,
@@ -626,7 +613,7 @@ def _resolve_arm_components(
         or observer.model not in catalog.models
     ):
         return None
-    if isinstance(target, PydanticAITargetComponent) and target.model not in catalog.models:
+    if target.model not in catalog.models:
         return None
     return (
         actor,
@@ -662,23 +649,23 @@ def _resolved_prompt(name: str, prompt: PromptComponent) -> ResolvedPrompt:
 def _resolve_target(
     name: str,
     component: TargetComponent,
+    harness: HarnessSpec,
     target_prompt: ResolvedPrompt,
     catalog: ComponentCatalog,
     catalog_directory: Path,
-    cache: dict[str, TargetSpec],
     path: str,
     issues: list[_Issue],
 ) -> TargetSpec | None:
-    if isinstance(component, PydanticAITargetComponent):
-        model = catalog.models.get(component.model)
-        if model is None:
-            _issue(
-                issues,
-                "REF_UNKNOWN",
-                f"catalog.targets.{name}.model",
-                f"unknown model {component.model!r}",
-            )
-            return None
+    model = catalog.models.get(component.model)
+    if model is None:
+        _issue(
+            issues,
+            "REF_UNKNOWN",
+            f"catalog.targets.{name}.model",
+            f"unknown model {component.model!r}",
+        )
+        return None
+    if isinstance(harness, PydanticAIHarness):
         return PydanticAITargetSpec(
             version=1,
             name=name,
@@ -687,25 +674,42 @@ def _resolve_target(
             instructions=target_prompt.text,
         )
 
-    cached = cache.get(name)
-    if cached is not None:
-        return cached
-    source = _resolve_path(catalog_directory, component.path)
+    source = _resolve_path(catalog_directory, harness.path)
     try:
         target = load_target(source).spec
     except ValueError as error:
         _issue(issues, "TARGET_LOAD", f"{path}.target", str(error).splitlines()[0])
         return None
-    if target.kind != component.kind:
+    if target.kind != harness.kind:
         _issue(
             issues,
             "COMPAT_TARGET_FILE",
             f"{path}.target",
-            f"catalog declares {component.kind!r} but {source} contains {target.kind!r}",
+            f"harness declares {harness.kind!r} but {source} contains {target.kind!r}",
         )
         return None
-    cache[name] = target
-    return target
+    credential_names = required_environment(model)
+    if isinstance(target, CommandTargetSpec):
+        if not isinstance(harness, CommandHarness):
+            raise AssertionError("command target requires a command harness")
+        return target.model_copy(
+            update={
+                "name": name,
+                "inherit_env": tuple(dict.fromkeys((*harness.environment, *credential_names))),
+            }
+        )
+    if isinstance(target, AgentEnvTargetSpec):
+        if not isinstance(harness, AgentEnvHarness):
+            raise AssertionError("AgentENV target requires an AgentENV harness")
+        return target.model_copy(
+            update={
+                "name": name,
+                "guest_env": tuple(
+                    dict.fromkeys((*harness.guest_environment, *credential_names))
+                ),
+            }
+        )
+    raise AssertionError(f"unhandled harness target: {target}")
 
 
 def _validate_catalog(catalog: ComponentCatalog, issues: list[_Issue]) -> None:
@@ -734,7 +738,7 @@ def _validate_catalog(catalog: ComponentCatalog, issues: list[_Issue]) -> None:
                 f"unknown model {observer.model!r}",
             )
     for name, target in catalog.targets.items():
-        if isinstance(target, PydanticAITargetComponent) and target.model not in catalog.models:
+        if target.model not in catalog.models:
             _issue(
                 issues,
                 "REF_UNKNOWN",
@@ -850,30 +854,33 @@ def _validate_prompt_roles(
 
 
 def _validate_compatibility(
-    target_kind: str,
-    harness_kind: str,
-    execution_kind: str,
+    harness: HarnessSpec,
+    execution: ExecutionSpec,
     path: str,
     issues: list[_Issue],
 ) -> None:
-    if target_kind != harness_kind:
-        _issue(
-            issues,
-            "COMPAT_TARGET_HARNESS",
-            f"{path}.harness",
-            f"target kind {target_kind!r} needs the matching harness kind",
-        )
     allowed_execution = {
         "pydantic_ai": {"host"},
         "command": {"host", "container"},
         "agentenv": {"agentenv"},
-    }[harness_kind]
-    if execution_kind not in allowed_execution:
+    }[harness.kind]
+    if execution.kind not in allowed_execution:
         _issue(
             issues,
             "COMPAT_HARNESS_EXECUTION",
             f"{path}.execution",
-            f"harness kind {harness_kind!r} cannot use execution kind {execution_kind!r}",
+            f"harness kind {harness.kind!r} cannot use execution kind {execution.kind!r}",
+        )
+    if (
+        isinstance(harness, PydanticAIHarness)
+        and isinstance(execution, HostExecution)
+        and execution.workspace_mode != "shared"
+    ):
+        _issue(
+            issues,
+            "COMPAT_WORKSPACE_MODE",
+            f"{path}.execution",
+            "the in-process harness has no workspace to isolate",
         )
 
 

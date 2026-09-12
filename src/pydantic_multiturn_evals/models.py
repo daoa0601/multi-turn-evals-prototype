@@ -392,6 +392,7 @@ class SessionContext:
     target_version: int
     key: CaseKey
     run_id: str
+    target_model: ModelSpec | None = None
     target_instructions: str | None = None
     fixture: tuple[FixtureEntry, ...] = ()
     comparison_id: str | None = None

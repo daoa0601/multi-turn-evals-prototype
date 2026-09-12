@@ -48,23 +48,19 @@ def test_checked_in_experiment_can_ablate_each_choice_independently() -> None:
         }
         assert actual_changes == changed_fields
 
-    assert isinstance(baseline.target, PydanticAITargetSpec)
+    assert isinstance(baseline.target, CommandTargetSpec)
     assert baseline.suite.actor.model.provider.kind == "zai"
     assert arms["actor-model"].suite.actor.model.provider.kind == "openai"
-    assert baseline.target.model.provider.kind == "zai"
-    target_model = arms["target-model"].target
-    assert isinstance(target_model, PydanticAITargetSpec)
-    assert target_model.model.provider.kind == "openai-compatible"
+    assert baseline.target_model.provider.kind == "zai"
+    assert arms["target-model"].target_model.provider.kind == "openai-compatible"
     assert baseline.suite.judge.model.provider.kind == "zai"
     assert arms["judge-model"].suite.judge.model.provider.kind == "anthropic"
     assert baseline.observer_model.provider.kind == "zai"
     assert arms["observer-model"].observer_model.provider.kind == "anthropic"
-    target_prompt = arms["target-prompt"].target
-    assert isinstance(target_prompt, PydanticAITargetSpec)
-    assert target_prompt.instructions != baseline.target.instructions
+    assert arms["target-prompt"].prompts.target != baseline.prompts.target
     assert arms["fixture"].fixture.values != baseline.fixture.values
     assert len(arms["task-selection"].cases) == 1
-    assert arms["harness"].harness != baseline.harness
+    assert isinstance(arms["harness"].target, PydanticAITargetSpec)
     assert arms["execution"].execution != baseline.execution
     assert arms["limits"].suite.limits != baseline.suite.limits
 
@@ -165,14 +161,12 @@ def test_command_and_agentenv_targets_are_resolved_and_embedded(tmp_path: Path) 
             {
                 "name": "command",
                 "select": {
-                    "target": "support-command",
                     "harness": "command-jsonl",
                 },
             },
             {
                 "name": "agentenv",
                 "select": {
-                    "target": "support-agentenv",
                     "harness": "agentenv-session",
                     "execution": "agentenv-remote",
                 },

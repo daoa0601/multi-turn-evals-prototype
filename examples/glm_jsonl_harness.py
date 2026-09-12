@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from pathlib import Path
 
 from pydantic_multiturn_evals.models import (
     AssistantTurn,
     CaseKey,
     ConversationView,
     Exchange,
+    PydanticAITargetSpec,
     SessionContext,
     UserTurn,
 )
@@ -22,16 +22,23 @@ from pydantic_multiturn_evals.protocol import (
     StartRequest,
     TurnRequest,
 )
-from pydantic_multiturn_evals.spec import load_target
-from pydantic_multiturn_evals.targets import build_target
-
-ROOT = Path(__file__).parents[1]
+from pydantic_multiturn_evals.providers import PydanticAITarget
 
 
 async def main() -> int:
-    target = build_target(load_target(ROOT / "targets" / "glm-wide.yaml"))
     start = StartRequest.model_validate(await _read())
     wire = start.session
+    if wire.target_model is None or wire.target_instructions is None:
+        raise ValueError("command harness needs a resolved target model and prompt")
+    target = PydanticAITarget(
+        PydanticAITargetSpec(
+            version=1,
+            name=wire.target,
+            kind="pydantic_ai",
+            model=wire.target_model,
+            instructions=wire.target_instructions,
+        )
+    )
     context = SessionContext(
         suite_name=wire.suite,
         target_name=target.name,
@@ -42,6 +49,7 @@ async def main() -> int:
             repeat_index=wire.repeat_index,
         ),
         run_id=wire.run_id,
+        target_model=wire.target_model,
         target_instructions=wire.target_instructions,
         fixture=wire.fixture,
         comparison_id=wire.comparison_id,

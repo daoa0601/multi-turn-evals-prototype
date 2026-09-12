@@ -29,6 +29,7 @@ from pydantic_multiturn_evals.models import (
     FixtureEntry,
     GatePolicy,
     GateResult,
+    ModelSpec,
     PlannedCase,
     ScenarioResult,
     SuiteSpec,
@@ -86,6 +87,7 @@ def build_dataset(
     *,
     judge_binding: BoundModel,
     repeat: int = 1,
+    planned_cases: tuple[PlannedCase, ...] | None = None,
 ) -> Dataset[PlannedCase, ScenarioResult, None]:
     cases = [
         Case[PlannedCase, ScenarioResult, None](
@@ -99,7 +101,7 @@ def build_dataset(
                 ),
             ),
         )
-        for planned in plan_cases(suite, repeat)
+        for planned in (planned_cases or plan_cases(suite, repeat))
     ]
     return Dataset(name=suite.name, cases=cases)
 
@@ -192,9 +194,11 @@ async def evaluate_suite(
     state_store: StateStore | None = None,
     max_concurrency: int = 1,
     repeat: int = 1,
+    planned_cases: tuple[PlannedCase, ...] | None = None,
     progress: bool = True,
     comparison_id: str | None = None,
     arm: str | None = None,
+    target_model: ModelSpec | None = None,
     target_instructions: str | None = None,
     fixture: tuple[FixtureEntry, ...] = (),
     capture_target_evidence: bool = True,
@@ -211,7 +215,12 @@ async def evaluate_suite(
     adaptive_actor = actor or PydanticActor(suite.actor)
     evaluator_binding = judge_binding or bind_model(suite.judge.model)
     services = RunnerServices(state_store=state_store or InMemoryStateStore())
-    dataset = build_dataset(suite, judge_binding=evaluator_binding, repeat=repeat)
+    dataset = build_dataset(
+        suite,
+        judge_binding=evaluator_binding,
+        repeat=repeat,
+        planned_cases=planned_cases,
+    )
 
     async def task(planned: PlannedCase) -> ScenarioResult:
         result = await run_scenario(
@@ -224,6 +233,7 @@ async def evaluate_suite(
             key=planned.key,
             comparison_id=comparison_id,
             arm=arm,
+            target_model=target_model,
             target_instructions=target_instructions,
             fixture=fixture,
             trace=trace,

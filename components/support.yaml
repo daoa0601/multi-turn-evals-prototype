@@ -49,16 +49,8 @@ actors:
   openai-user: {model: openai-user, model_request_limit: 2}
 
 targets:
-  support-glm: {kind: pydantic_ai, model: glm-target}
-  support-deepseek: {kind: pydantic_ai, model: deepseek-target}
-  support-command:
-    kind: command
-    path: ../targets/command-example.yaml
-    max_output_tokens_per_turn: 700
-  support-agentenv:
-    kind: agentenv
-    path: ../targets/agentenv-example.yaml
-    max_output_tokens_per_turn: 700
+  support-glm: {model: glm-target}
+  support-deepseek: {model: deepseek-target}
 
 judges:
   strict-glm: {model: glm-judge}
@@ -110,8 +102,14 @@ task_selectors:
 harnesses:
   adaptive-full: {kind: pydantic_ai, capture_target_evidence: true}
   adaptive-lean: {kind: pydantic_ai, capture_target_evidence: false}
-  command-jsonl: {kind: command, protocol_version: 2}
-  agentenv-session: {kind: agentenv, protocol_version: 1}
+  command-jsonl:
+    kind: command
+    protocol_version: 2
+    path: ../targets/glm-wide-command.yaml
+  agentenv-session:
+    kind: agentenv
+    protocol_version: 1
+    path: ../targets/agentenv-example.yaml
 
 executions:
   local: {kind: host, workspace_mode: shared}

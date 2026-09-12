@@ -16,9 +16,11 @@ from pydantic_multiturn_evals.evaluation import evaluate_suite
 from pydantic_multiturn_evals.models import (
     AcceptDecision,
     ActorBrief,
+    CaseKey,
     EnvironmentEvidence,
     FixtureEntry,
     GatePolicy,
+    PlannedCase,
     Scenario,
     SessionContext,
     SessionOutcome,
@@ -263,3 +265,30 @@ def test_evaluation_passes_prompt_and_fixture_to_each_target_session() -> None:
         FixtureEntry(name="account_tier", value="priority"),
     )
     assert result.report.cases[0].output.target_evidence == ()
+
+
+def test_evaluation_preserves_a_caller_planned_repeat_key() -> None:
+    source = suite()
+    planned = PlannedCase(
+        key=CaseKey(scenario_id="help", repeat_index=7),
+        case_name="help [7]",
+        scenario=source.scenarios[0],
+    )
+
+    result = asyncio.run(
+        evaluate_suite(
+            source,
+            target=helpful_target(),
+            actor=AcceptingActor(),
+            judge_binding=fake_model_binding(
+                TestModel(
+                    custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9}
+                )
+            ),
+            planned_cases=(planned,),
+            progress=False,
+        )
+    )
+
+    assert result.gate.cases[0].repeat_index == 7
+    assert result.report.cases[0].output.repeat_index == 7

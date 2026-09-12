@@ -9,6 +9,7 @@ from pydantic import Field, JsonValue
 from pydantic_multiturn_evals.models import (
     AssistantTurn,
     FixtureEntry,
+    ModelSpec,
     SessionOutcome,
     StrictModel,
     TargetCompletion,
@@ -25,6 +26,7 @@ class WireSession(StrictModel):
     scenario_id: str
     repeat_index: int = Field(ge=1)
     run_id: str
+    target_model: ModelSpec | None = None
     target_instructions: str | None = None
     fixture: tuple[FixtureEntry, ...] = ()
 

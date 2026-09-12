@@ -16,7 +16,7 @@ defaults:
     trajectory: turn-progress
   fixture: empty
   tasks: smoke
-  harness: adaptive-full
+  harness: command-jsonl
   execution: local
   limits: short
 
@@ -40,9 +40,9 @@ design:
     - name: task-selection
       select: {tasks: cancel-only}
     - name: harness
-      select: {harness: adaptive-lean}
+      select: {harness: adaptive-full}
     - name: execution
-      select: {execution: isolated-local}
+      select: {execution: container}
     - name: limits
       select: {limits: extended}
   comparisons:
