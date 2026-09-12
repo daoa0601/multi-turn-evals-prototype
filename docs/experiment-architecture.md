@@ -79,7 +79,7 @@ The authored inputs have three owners.
 - A `ComponentCatalog` owns reusable model bindings, actors, targets, judges, prompt slots, fixtures, task selectors, harnesses, executions, and limit profiles.
 - An `ExperimentSpec` owns arm selection, matrix expansion, comparisons, repeats, diagnostics, and resource bounds.
 
-The compiler resolves those inputs into a `RunPlan`. The plan embeds rendered scenarios, selected component settings, fixture content, comparison membership, execution configuration, and source provenance. It stores credential environment names but never credential values. Execution reads the plan rather than the authored YAML.
+The compiler resolves those inputs into a `RunPlan`. The plan embeds rendered scenarios, selected component settings, fixture content, comparison membership, execution configuration, and source provenance. It stores credential environment names but never credential values. Planning copies command workspaces into the output directory, and execution reads the saved plan rather than the authored YAML. Provider services, interpreters, and container images remain external resources and need immutable versioning when reproducibility depends on them.
 
 ```python
 class CorpusCaseKey:

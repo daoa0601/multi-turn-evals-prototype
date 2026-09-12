@@ -126,8 +126,9 @@ def save_new_experiment(plan: ExperimentPlan, directory: Path) -> None:
         if existing:
             raise ValueError(f"experiment output directory is not empty: {directory}")
     directory.mkdir(parents=True, exist_ok=True)
-    _write_json_atomic(directory / "plan.json", plan.model_dump(mode="json"))
-    _write_summary(plan, directory)
+    frozen_plan = _freeze_command_workspaces(plan, directory)
+    _write_json_atomic(directory / "plan.json", frozen_plan.model_dump(mode="json"))
+    _write_summary(frozen_plan, directory)
 
 
 def load_saved_experiment(directory: Path) -> ExperimentPlan:
@@ -444,6 +445,45 @@ def _materialize_target_spec(
             argv = (str((spec.cwd / executable).resolve()), *spec.argv[1:])
         return spec.model_copy(update={"cwd": workspace, "argv": argv})
     return spec
+
+
+def _freeze_command_workspaces(plan: ExperimentPlan, directory: Path) -> ExperimentPlan:
+    frozen_root = directory / "frozen-workspaces"
+    destinations: dict[Path, Path] = {}
+    frozen_arms: list[SessionArmPlan] = []
+    for arm in plan.arms:
+        target = arm.target
+        if not isinstance(target, CommandTargetSpec):
+            frozen_arms.append(arm)
+            continue
+        source = target.cwd.resolve()
+        destination = destinations.get(source)
+        if destination is None:
+            destination = frozen_root / f"{len(destinations) + 1:04d}"
+            shutil.copytree(
+                source,
+                destination,
+                ignore=shutil.ignore_patterns(
+                    ".git",
+                    ".venv",
+                    ".audit",
+                    ".references",
+                    "__pycache__",
+                    "dist",
+                    "outputs",
+                ),
+            )
+            destinations[source] = destination
+        executable = Path(target.argv[0])
+        argv = target.argv
+        if not executable.is_absolute() and executable.parent != Path("."):
+            argv = (str((source / executable).resolve()), *target.argv[1:])
+        frozen_arms.append(
+            arm.model_copy(
+                update={"target": target.model_copy(update={"cwd": destination, "argv": argv})}
+            )
+        )
+    return plan.model_copy(update={"arms": tuple(frozen_arms)})
 
 
 def _preflight_target(

@@ -22,6 +22,11 @@ routes, prompts, fixture, selected tasks, harness configuration, execution confi
 comparison pairs, and conservative request and output-token reservations. It stores credential
 environment variable names, never their values.
 
+Planning copies each command harness workspace into the run directory and rewrites the saved command
+configuration to that snapshot. Later source edits therefore cannot mix command implementations
+within a resumed run. Interpreters, provider endpoints, and container images remain external
+resources; use versioned, immutable references for reproducible production comparisons.
+
 Runtime preflight checks every arm before work begins. A missing provider key or executable fails the
 whole preflight; it never removes an arm and then reports reduced coverage as success.
 

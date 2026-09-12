@@ -121,6 +121,10 @@ def test_plan_and_summary_are_readable_json_artifacts(tmp_path: Path) -> None:
     saved_plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
     saved_summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     assert saved_plan["experiment_name"] == "support-ab"
+    command_arm = next(arm for arm in saved_plan["arms"] if arm["target"]["kind"] == "command")
+    frozen_cwd = Path(command_arm["target"]["cwd"])
+    assert frozen_cwd.is_relative_to(output)
+    assert (frozen_cwd / "examples" / "glm_jsonl_harness.py").exists()
     assert summary.pending == experiment.reservation.case_count
     assert saved_summary["pending"] == experiment.reservation.case_count
 

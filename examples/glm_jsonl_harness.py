@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 
-from pydantic_multiturn_evals.models import (
+ROOT = Path(__file__).parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+# A frozen run imports the source snapshot beside this adapter, not the editable checkout.
+from pydantic_multiturn_evals.models import (  # noqa: E402
     AssistantTurn,
     CaseKey,
     ConversationView,
@@ -15,14 +20,14 @@ from pydantic_multiturn_evals.models import (
     SessionContext,
     UserTurn,
 )
-from pydantic_multiturn_evals.protocol import (
+from pydantic_multiturn_evals.protocol import (  # noqa: E402
     CloseRequest,
     FinishRequest,
     ReplyResponse,
     StartRequest,
     TurnRequest,
 )
-from pydantic_multiturn_evals.providers import PydanticAITarget
+from pydantic_multiturn_evals.providers import PydanticAITarget  # noqa: E402
 
 
 async def main() -> int:
