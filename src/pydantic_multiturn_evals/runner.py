@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import Literal, Protocol, TypeVar
+from typing import Protocol, TypeVar
 from uuid import uuid4
 
 from pydantic_multiturn_evals.models import (
@@ -21,6 +21,7 @@ from pydantic_multiturn_evals.models import (
     ConversationState,
     ConversationView,
     Exchange,
+    FixtureEntry,
     Scenario,
     ScenarioLimits,
     ScenarioResult,
@@ -74,7 +75,9 @@ async def run_scenario(
     suite_name: str = "library",
     key: CaseKey | None = None,
     comparison_id: str | None = None,
-    arm: Literal["baseline", "candidate"] | None = None,
+    arm: str | None = None,
+    target_instructions: str | None = None,
+    fixture: tuple[FixtureEntry, ...] = (),
     trace: TraceRuntime = NO_TRACE,
 ) -> ScenarioResult:
     """Run one scenario until the actor stops it or the hard turn limit wins."""
@@ -89,6 +92,8 @@ async def run_scenario(
         target_version=target.version,
         key=case_key,
         run_id=run_id,
+        target_instructions=target_instructions,
+        fixture=fixture,
         comparison_id=comparison_id,
         arm=arm,
     )

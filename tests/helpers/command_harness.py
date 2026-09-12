@@ -15,12 +15,14 @@ def send(payload: dict[str, object]) -> None:
 mode = os.environ.get("HARNESS_MODE", "ok")
 variant = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("HARNESS_VARIANT", "target")
 pid_file = os.environ.get("HARNESS_PID_FILE")
+session: dict[str, object] = {}
 if pid_file:
     Path(pid_file).write_text(str(os.getpid()), encoding="utf-8")
 
 for raw_line in sys.stdin:
     request = json.loads(raw_line)
     if request["type"] == "start":
+        session = request["session"]
         protocol = 1 if mode == "version-one" else 2
         send({"protocol": protocol, "type": "ready"})
         continue
@@ -75,6 +77,10 @@ for raw_line in sys.stdin:
             "id": turn_id,
             "assistant_text": f"{variant} reply {turn_id}",
             "session_id": f"{variant}-{os.getpid()}",
-            "evidence": {"message_count": len(request["messages"])},
+            "evidence": {
+                "message_count": len(request["messages"]),
+                "target_instructions": session.get("target_instructions"),
+                "fixture": session.get("fixture"),
+            },
         }
     )

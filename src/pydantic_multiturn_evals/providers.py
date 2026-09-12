@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from pydantic import model_validator
-from pydantic_ai import Agent, format_as_xml
+from pydantic_ai import Agent, ModelSettings, format_as_xml
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.usage import UsageLimits
 
@@ -19,6 +19,7 @@ from pydantic_multiturn_evals.models import (
     AssistantTurn,
     ContinueDecision,
     ConversationView,
+    FixtureEntry,
     PydanticAITargetSpec,
     SessionContext,
     SessionOutcome,
@@ -109,17 +110,49 @@ class PydanticAITarget:
         self.name = spec.name
         self.version = spec.version
         self._settings = binding.settings
-        self._agent = Agent(binding.model, output_type=str, instructions=spec.instructions)
+        self._instructions = spec.instructions
+        self._agent = Agent(binding.model, output_type=str)
 
     @asynccontextmanager
-    async def session(self, context: SessionContext) -> AsyncIterator[PydanticAITarget]:
-        yield self
+    async def session(self, context: SessionContext) -> AsyncIterator[_PydanticAISession]:
+        yield _PydanticAISession(
+            self._agent,
+            self._settings,
+            context.target_instructions or self._instructions,
+            context.fixture,
+        )
+
+    def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
+        return ()
+
+
+class _PydanticAISession:
+    def __init__(
+        self,
+        agent: Agent[None, str],
+        settings: ModelSettings,
+        instructions: str,
+        fixture: tuple[FixtureEntry, ...],
+    ) -> None:
+        self._agent = agent
+        self._settings = settings
+        self._instructions = instructions
+        self._fixture = fixture
 
     async def reply(self, view: ConversationView) -> TargetReply:
+        instructions = self._instructions
+        if self._fixture:
+            fixture_xml = format_as_xml({item.name: item.value for item in self._fixture})
+            instructions += (
+                "\n\n"
+                "Use this session fixture as provided context. Do not claim it proves that an "
+                f"external action occurred.\n{fixture_xml}"
+            )
         result = await self._agent.run(
             view.pending_user.content,
             message_history=_message_history(view),
             conversation_id=view.run_id,
+            instructions=instructions,
             model_settings=self._settings,
             metadata={"scenario_id": view.scenario_id, "eval_role": "target"},
         )
@@ -127,9 +160,6 @@ class PydanticAITarget:
 
     async def finish(self, outcome: SessionOutcome) -> TargetCompletion:
         return TargetCompletion()
-
-    def failure_evidence(self) -> tuple[TargetFailureEvidence, ...]:
-        return ()
 
 
 def _message_history(view: ConversationView) -> tuple[ModelMessage, ...]:

@@ -157,6 +157,8 @@ class _AgentEnvSession:
             "id": self._turn_index,
             "run_id": view.run_id,
             "scenario_id": view.scenario_id,
+            "target_instructions": self._context.target_instructions,
+            "fixture": [item.model_dump(mode="json") for item in self._context.fixture],
             "messages": [message.model_dump(mode="json") for message in view.messages],
         }
         await self._write(request_path, _json_bytes(request))

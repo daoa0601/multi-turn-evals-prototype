@@ -110,6 +110,8 @@ class _CommandSession:
                     scenario_id=self._context.key.scenario_id,
                     repeat_index=self._context.key.repeat_index,
                     run_id=self._context.run_id,
+                    target_instructions=self._context.target_instructions,
+                    fixture=self._context.fixture,
                 )
             )
         )

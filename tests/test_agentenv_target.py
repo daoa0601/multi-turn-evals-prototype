@@ -15,6 +15,7 @@ from pydantic_multiturn_evals.models import (
     AgentEnvTargetSpec,
     CaseKey,
     ConversationView,
+    FixtureEntry,
     SandboxCommandSpec,
     SessionContext,
     SessionOutcome,
@@ -109,6 +110,8 @@ def context() -> SessionContext:
         target_version=1,
         key=CaseKey(scenario_id="help", repeat_index=2),
         run_id="run-1",
+        target_instructions="Use the selected prompt.",
+        fixture=(FixtureEntry(name="account_tier", value="priority"),),
     )
 
 
@@ -146,6 +149,15 @@ def test_agentenv_uses_one_sandbox_and_verifies_before_destroy() -> None:
         assert completion.environment.reward == 0.8
         assert sandbox.events == ["turn", "verify", "destroy"]
         assert len(factory.contexts) == 1
+        turn_request = next(
+            json.loads(value)
+            for path, value in sandbox.files.items()
+            if path.endswith("turn-1-request.json")
+        )
+        assert turn_request["target_instructions"] == "Use the selected prompt."
+        assert turn_request["fixture"] == [
+            {"name": "account_tier", "value": "priority"}
+        ]
 
     asyncio.run(exercise())
 

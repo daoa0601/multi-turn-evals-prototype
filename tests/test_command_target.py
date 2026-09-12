@@ -12,6 +12,7 @@ from pydantic_multiturn_evals.models import (
     CommandLimits,
     CommandTargetSpec,
     ConversationView,
+    FixtureEntry,
     SessionContext,
     SessionOutcome,
     TargetCompletion,
@@ -64,6 +65,8 @@ def context() -> SessionContext:
         target_version=1,
         key=CaseKey(scenario_id="help", repeat_index=1),
         run_id="run-1",
+        target_instructions="Use the selected prompt.",
+        fixture=(FixtureEntry(name="account_tier", value="priority"),),
     )
 
 
@@ -93,6 +96,10 @@ def test_command_target_uses_one_jsonl_session_and_returns_evidence() -> None:
         assert first.assistant_text == "example reply 1"
         assert second.assistant_text == "example reply 2"
         assert first.evidence["message_count"] == 1
+        assert first.evidence["target_instructions"] == "Use the selected prompt."
+        assert first.evidence["fixture"] == [
+            {"name": "account_tier", "value": "priority"}
+        ]
         assert first.session_id == second.session_id
         assert completion == TargetCompletion(details={"adapter_finished": True})
 

@@ -42,6 +42,8 @@ async def main() -> int:
             repeat_index=wire.repeat_index,
         ),
         run_id=wire.run_id,
+        target_instructions=wire.target_instructions,
+        fixture=wire.fixture,
         comparison_id=wire.comparison_id,
         arm=wire.arm,
     )

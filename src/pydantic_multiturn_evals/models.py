@@ -379,6 +379,11 @@ class PlannedCase(StrictModel):
     scenario: Scenario
 
 
+class FixtureEntry(StrictModel):
+    name: Identifier
+    value: JsonValue
+
+
 @dataclass(frozen=True, slots=True)
 class SessionContext:
     suite_name: str
@@ -387,8 +392,10 @@ class SessionContext:
     target_version: int
     key: CaseKey
     run_id: str
+    target_instructions: str | None = None
+    fixture: tuple[FixtureEntry, ...] = ()
     comparison_id: str | None = None
-    arm: Literal["baseline", "candidate"] | None = None
+    arm: Identifier | None = None
 
 
 class CaseGate(StrictModel):

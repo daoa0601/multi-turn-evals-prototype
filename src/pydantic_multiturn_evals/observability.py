@@ -6,7 +6,7 @@ import os
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from pydantic_ai import Agent
 
@@ -19,7 +19,7 @@ class TraceFields:
     target: str | None = None
     harness: ExecutionKind | None = None
     comparison_id: str | None = None
-    arm: Literal["baseline", "candidate"] | None = None
+    arm: str | None = None
     scenario_id: str | None = None
     repeat_index: int | None = None
     run_id: str | None = None

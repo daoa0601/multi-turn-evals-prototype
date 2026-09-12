@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import fmean
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
 from pydantic_ai import ModelSettings
@@ -26,6 +26,7 @@ from pydantic_multiturn_evals.model_bindings import BoundModel, bind_model
 from pydantic_multiturn_evals.models import (
     CaseGate,
     CaseKey,
+    FixtureEntry,
     GatePolicy,
     GateResult,
     PlannedCase,
@@ -193,7 +194,10 @@ async def evaluate_suite(
     repeat: int = 1,
     progress: bool = True,
     comparison_id: str | None = None,
-    arm: Literal["baseline", "candidate"] | None = None,
+    arm: str | None = None,
+    target_instructions: str | None = None,
+    fixture: tuple[FixtureEntry, ...] = (),
+    capture_target_evidence: bool = True,
     trajectory_assessor: TrajectoryAssessor | None = None,
     trajectory_rubric: str | None = None,
     max_trajectory_prefixes: int = 4,
@@ -210,7 +214,7 @@ async def evaluate_suite(
     dataset = build_dataset(suite, judge_binding=evaluator_binding, repeat=repeat)
 
     async def task(planned: PlannedCase) -> ScenarioResult:
-        return await run_scenario(
+        result = await run_scenario(
             planned.scenario,
             limits=suite.limits_for(planned.scenario),
             target=target,
@@ -220,8 +224,13 @@ async def evaluate_suite(
             key=planned.key,
             comparison_id=comparison_id,
             arm=arm,
+            target_instructions=target_instructions,
+            fixture=fixture,
             trace=trace,
         )
+        if capture_target_evidence:
+            return result
+        return result.model_copy(update={"target_evidence": ()})
 
     fields = TraceFields(
         suite=suite.name,

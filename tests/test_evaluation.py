@@ -17,6 +17,7 @@ from pydantic_multiturn_evals.models import (
     AcceptDecision,
     ActorBrief,
     EnvironmentEvidence,
+    FixtureEntry,
     GatePolicy,
     Scenario,
     SessionContext,
@@ -48,9 +49,11 @@ class EvalTarget:
     ) -> None:
         self._reply = reply
         self._completion = completion or TargetCompletion()
+        self.contexts: list[SessionContext] = []
 
     @asynccontextmanager
     async def session(self, context: SessionContext) -> AsyncIterator[EvalTarget]:
+        self.contexts.append(context)
         yield self
 
     async def reply(self, view: ConversationView) -> TargetReply:
@@ -233,3 +236,30 @@ def test_trajectory_failure_is_visible_but_cannot_fail_the_primary_gate(tmp_path
     )
     saved = json.loads((tmp_path / "trajectory.jsonl").read_text())
     assert saved["assessment"]["points"][0]["status"] == "failed"
+
+
+def test_evaluation_passes_prompt_and_fixture_to_each_target_session() -> None:
+    target = helpful_target()
+
+    result = asyncio.run(
+        evaluate_suite(
+            suite(),
+            target=target,
+            actor=AcceptingActor(),
+            judge_binding=fake_model_binding(
+                TestModel(
+                    custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9}
+                )
+            ),
+            target_instructions="Use the selected target prompt.",
+            fixture=(FixtureEntry(name="account_tier", value="priority"),),
+            capture_target_evidence=False,
+            progress=False,
+        )
+    )
+
+    assert target.contexts[0].target_instructions == "Use the selected target prompt."
+    assert target.contexts[0].fixture == (
+        FixtureEntry(name="account_tier", value="priority"),
+    )
+    assert result.report.cases[0].output.target_evidence == ()
