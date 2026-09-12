@@ -72,6 +72,7 @@ def test_matrix_expansion_is_deterministic_and_stops_above_the_arm_bound(tmp_pat
         "kind": "matrix",
         "axes": {
             "prompts.target": ["support-current", "support-concise"],
+            "prompts.trajectory": ["turn-progress"],
             "actor": ["patient-user", "openai-user"],
         },
         "comparisons": [],
@@ -84,10 +85,10 @@ def test_matrix_expansion_is_deterministic_and_stops_above_the_arm_bound(tmp_pat
     second = compile_experiment(load_experiment(experiment_path))
 
     assert [arm.name for arm in first.arms] == [
-        "actor-patient-user--prompts-target-support-current",
-        "actor-patient-user--prompts-target-support-concise",
-        "actor-openai-user--prompts-target-support-current",
-        "actor-openai-user--prompts-target-support-concise",
+        "actor-patient-user--prompts-target-support-current--prompts-trajectory-turn-progress",
+        "actor-patient-user--prompts-target-support-concise--prompts-trajectory-turn-progress",
+        "actor-openai-user--prompts-target-support-current--prompts-trajectory-turn-progress",
+        "actor-openai-user--prompts-target-support-concise--prompts-trajectory-turn-progress",
     ]
     assert first.model_dump_json() == second.model_dump_json()
 
