@@ -2,7 +2,8 @@
 
 This package runs adaptive conversation scenarios through Pydantic Evals. Each scenario begins with
 an authored prompt. A simulated user reads each target reply and decides whether to continue,
-accept, or stop. A separate LLM judge grades only the visible user and assistant text.
+accept, or stop. A separate final judge grades only the visible conversation. An optional trajectory
+observer grades bounded transcript prefixes after completion and cannot steer or fail the run.
 
 The packaged runner supports three local target kinds:
 
@@ -43,7 +44,29 @@ Common options are `temperature`, `top_p`, `thinking`, `max_tokens`, and `timeou
 sampling options stay absent from the provider request. The resolver does not send Z.AI-specific
 fields to other providers.
 
-## Run the checked-in A/B comparison
+## Compile and run an experiment
+
+An experiment selects its corpus, actor, target, final judge, trajectory observer, prompts, fixture,
+task subset, harness, execution environment, and limits by name. Explicit arms change one or more
+choices; a matrix expands several axes deterministically. Compilation validates and embeds every
+choice without reading credentials or starting a provider.
+
+```console
+uv run multiturn-evals plan experiments/support-ab.yaml --out outputs/support-ab-plan
+uv run multiturn-evals experiment-run outputs/support-ab-plan
+uv run multiturn-evals resume outputs/support-ab-plan
+```
+
+The checked-in support experiment is intentionally a portability manifest: some arms require
+OpenAI, Anthropic, and DeepSeek credentials. Runtime preflight reports every missing requirement
+before any arm starts. Edit the arm list or supply the named credentials before running it.
+
+Each case gets a durable directory with the frozen input, normal evaluation artifacts, trajectory
+diagnostics, and one terminal receipt. Resume skips completed and failed work. A case left with only
+`started.json` is marked interrupted instead of replaying a possibly state-changing interaction.
+Comparisons pair exact `(scenario_id, repeat_index)` corpus keys across arbitrary named arms.
+
+## Run the low-level two-target API
 
 ```console
 uv sync --extra tracing
@@ -87,13 +110,13 @@ uv run multiturn-evals run scenarios/support.yaml \
   --out outputs/support
 ```
 
-## Run the broad GLM campaign
+## Run the broad GLM experiment
 
-[`campaigns/glm-wide.yaml`](campaigns/glm-wide.yaml) expands 20 adaptive scenarios across web chat,
+[`experiments/glm-wide.yaml`](experiments/glm-wide.yaml) expands 20 adaptive scenarios across web chat,
 email, ticket, CLI, and API response modes. The scenarios cover 19 task types and nine operating
 contexts. The checked-in lanes run `glm-5.3-flash` directly through Pydantic AI, through one local
 JSONL child process per case, and through the same JSONL contract in a Docker container. Build the
-container lane before running the campaign:
+container harness before running the experiment:
 
 ```console
 scripts/build_glm_harness_image.sh
@@ -102,25 +125,22 @@ scripts/build_glm_harness_image.sh
 Inspect the resolved plan before making model calls:
 
 ```console
-uv run python scripts/run_scale_campaign.py plan campaigns/glm-wide.yaml \
-  --out outputs/glm-wide-plan
+uv run multiturn-evals plan experiments/glm-wide.yaml --out outputs/glm-wide
 ```
 
-Run the campaign or resume its saved plan:
+Run or resume its saved plan:
 
 ```console
-uv run python scripts/run_scale_campaign.py run campaigns/glm-wide.yaml \
-  --out outputs/glm-wide
-uv run python scripts/run_scale_campaign.py resume outputs/glm-wide
+uv run multiturn-evals experiment-run outputs/glm-wide
+uv run multiturn-evals resume outputs/glm-wide
 ```
 
 Each case writes its evaluation artifacts and a terminal receipt before the coordinator marks it
 complete. Resume skips completed and failed cases. It marks a previously started case as interrupted
-instead of replaying possible external side effects. The plan also records unavailable lanes and the
-reason each lane was excluded. See [the campaign design](docs/scale-campaign.md) for the data and
-recovery contract.
+instead of replaying possible external side effects. See [the scale-run design](docs/scale-campaign.md)
+for the data and recovery contract.
 
-The manual [`Scale evals`](.github/workflows/scale-evals.yml) workflow runs the same campaign and
+The manual [`Scale evals`](.github/workflows/scale-evals.yml) workflow runs the same experiment and
 uploads the complete run directory even when the quality gate fails.
 
 ## Plug in another CLI harness

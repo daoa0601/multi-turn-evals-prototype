@@ -216,3 +216,22 @@ def test_case_bound_applies_after_task_selection_and_repeats(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match=r"\[BOUND_CASES\] bounds.max_cases"):
         compile_experiment(load_experiment(experiment_path))
+
+
+def test_checked_in_wide_experiment_covers_three_harness_environments() -> None:
+    plan = compile_experiment(ROOT / "experiments" / "glm-wide.yaml")
+
+    assert plan.reservation.case_count == 60
+    assert plan.reservation.model_requests == 780
+    assert {arm.target.kind for arm in plan.arms} == {"pydantic_ai", "command"}
+    assert {arm.execution.kind for arm in plan.arms} == {"host", "container"}
+    channels = {
+        tag for case in plan.corpus.cases for tag in case.tags if tag.startswith("channel.")
+    }
+    assert channels == {
+        "channel.api",
+        "channel.cli",
+        "channel.email",
+        "channel.ticket",
+        "channel.web-chat",
+    }

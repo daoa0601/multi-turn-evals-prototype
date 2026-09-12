@@ -56,7 +56,7 @@ bounds:
 
 ```console
 uv run multiturn-evals plan experiments/support.yaml --out outputs/support
-uv run multiturn-evals run outputs/support
+uv run multiturn-evals experiment-run outputs/support
 uv run multiturn-evals resume outputs/support
 ```
 
@@ -181,13 +181,15 @@ A generic component registry was rejected because it exposes registration, capab
 - Should a judge ablation be allowed to gate a target comparison, or should it produce a grading-policy comparison only?
 - What command protocol fields are required to apply target prompts and fixtures without exposing private actor or judge inputs?
 
-## Implementation sequence
+## Implemented boundary
 
-1. Replace Z.AI-only model construction with matched provider, model, settings, identity, and usage binding.
-2. Add corpus, catalog, experiment, arm, comparison, and frozen plan types with strict compilation.
-3. Execute and resume session arms through the existing adaptive runner, then migrate the scale campaign and delete its special compiler.
-4. Carry resolved prompts and fixtures across the command and AgentENV protocols.
-5. Add whole-job Harbor arms that compile only from frozen plans.
-6. Add actual usage artifacts and bounded non-gating trajectory assessment.
+The provider binding, corpus and catalog compiler, exact arm pairing, frozen plan, session-arm runner,
+durable case receipts, runtime preflight, prompt and fixture transport, and bounded non-gating
+trajectory assessment are implemented. The former scale-campaign compiler was deleted after its
+60-case GLM workload moved to this path.
+
+Whole-job Harbor arms and provider-reported actual usage remain separate follow-up boundaries. The
+plan does not call Harbor a session harness, and it records conservative reservations rather than
+presenting token-limit estimates as actual use.
 
 The implementation migrates affected callers with each unit and removes superseded APIs after their last caller moves. It does not add schema fallbacks.

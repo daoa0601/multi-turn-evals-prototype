@@ -170,9 +170,7 @@ def preflight_experiment(
         for role, model in models:
             for name in required_environment(model):
                 if not values.get(name):
-                    issues.append(
-                        ("PREFLIGHT_ENV", f"arms.{arm.name}.{role}", f"missing {name}")
-                    )
+                    issues.append(("PREFLIGHT_ENV", f"arms.{arm.name}.{role}", f"missing {name}"))
         _preflight_target(arm, values, issues)
     if issues:
         rendered = "\n".join(
@@ -205,9 +203,7 @@ async def execute_experiment(
 
     try:
         async with asyncio.timeout(plan.bounds.run_seconds):
-            await asyncio.gather(
-                *(bounded(ordinal, arm, case) for ordinal, arm, case in units)
-            )
+            await asyncio.gather(*(bounded(ordinal, arm, case) for ordinal, arm, case in units))
     except TimeoutError:
         _write_json_atomic(
             directory / "timeout.json",
@@ -364,8 +360,7 @@ async def _execute_case(
         target_instructions=arm.prompts.target.text,
         fixture=fixture,
         capture_target_evidence=(
-            not isinstance(arm.harness, PydanticAIHarness)
-            or arm.harness.capture_target_evidence
+            not isinstance(arm.harness, PydanticAIHarness) or arm.harness.capture_target_evidence
         ),
         trajectory_assessor=assessor,
         trajectory_rubric=(
@@ -453,9 +448,7 @@ def _preflight_target(
     if isinstance(spec, CommandTargetSpec):
         for name in spec.inherit_env:
             if not environment.get(name):
-                issues.append(
-                    ("PREFLIGHT_ENV", f"arms.{arm.name}.harness", f"missing {name}")
-                )
+                issues.append(("PREFLIGHT_ENV", f"arms.{arm.name}.harness", f"missing {name}"))
         executable = "docker" if isinstance(arm.execution, ContainerExecution) else spec.argv[0]
         if not _command_available(executable, spec.cwd, environment):
             issues.append(
@@ -474,12 +467,8 @@ def _preflight_target(
         )
         for name in names:
             if not environment.get(name):
-                issues.append(
-                    ("PREFLIGHT_ENV", f"arms.{arm.name}.execution", f"missing {name}")
-                )
-    if isinstance(arm.execution, AgentEnvExecution) and not isinstance(
-        spec, AgentEnvTargetSpec
-    ):
+                issues.append(("PREFLIGHT_ENV", f"arms.{arm.name}.execution", f"missing {name}"))
+    if isinstance(arm.execution, AgentEnvExecution) and not isinstance(spec, AgentEnvTargetSpec):
         issues.append(
             (
                 "PREFLIGHT_EXECUTION",

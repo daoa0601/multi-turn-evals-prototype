@@ -219,9 +219,7 @@ def test_trajectory_failure_is_visible_but_cannot_fail_the_primary_gate(tmp_path
             target=helpful_target(),
             actor=AcceptingActor(),
             judge_binding=fake_model_binding(
-                TestModel(
-                    custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9}
-                )
+                TestModel(custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9})
             ),
             trajectory_assessor=BrokenObserver(),
             trajectory_rubric="Judge progress and safety at this point.",
@@ -249,9 +247,7 @@ def test_evaluation_passes_prompt_and_fixture_to_each_target_session() -> None:
             target=target,
             actor=AcceptingActor(),
             judge_binding=fake_model_binding(
-                TestModel(
-                    custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9}
-                )
+                TestModel(custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9})
             ),
             target_instructions="Use the selected target prompt.",
             fixture=(FixtureEntry(name="account_tier", value="priority"),),
@@ -261,9 +257,7 @@ def test_evaluation_passes_prompt_and_fixture_to_each_target_session() -> None:
     )
 
     assert target.contexts[0].target_instructions == "Use the selected target prompt."
-    assert target.contexts[0].fixture == (
-        FixtureEntry(name="account_tier", value="priority"),
-    )
+    assert target.contexts[0].fixture == (FixtureEntry(name="account_tier", value="priority"),)
     assert result.report.cases[0].output.target_evidence == ()
 
 
@@ -281,9 +275,7 @@ def test_evaluation_preserves_a_caller_planned_repeat_key() -> None:
             target=helpful_target(),
             actor=AcceptingActor(),
             judge_binding=fake_model_binding(
-                TestModel(
-                    custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9}
-                )
+                TestModel(custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9})
             ),
             planned_cases=(planned,),
             progress=False,

@@ -97,9 +97,7 @@ def test_command_target_uses_one_jsonl_session_and_returns_evidence() -> None:
         assert second.assistant_text == "example reply 2"
         assert first.evidence["message_count"] == 1
         assert first.evidence["target_instructions"] == "Use the selected prompt."
-        assert first.evidence["fixture"] == [
-            {"name": "account_tier", "value": "priority"}
-        ]
+        assert first.evidence["fixture"] == [{"name": "account_tier", "value": "priority"}]
         assert first.session_id == second.session_id
         assert completion == TargetCompletion(details={"adapter_finished": True})
 

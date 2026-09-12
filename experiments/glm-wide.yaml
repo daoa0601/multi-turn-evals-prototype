@@ -1,0 +1,53 @@
+version: 1
+name: glm-wide
+corpus: ../corpora/glm-wide.yaml
+catalog: ../components/glm-wide.yaml
+
+defaults:
+  actor: simulated-user
+  target: glm-target
+  judge: quality-judge
+  observer: progress-observer
+  prompts:
+    actor: adaptive-user
+    target: general-assistant
+    judge: visible-quality
+    opening: unchanged-opening
+    trajectory: turn-progress
+  fixture: empty
+  tasks: all
+  harness: pydantic-direct
+  execution: host
+  limits: standard
+
+design:
+  kind: arms
+  arms:
+    - name: direct-glm
+    - name: command-glm
+      select:
+        harness: command-jsonl
+    - name: docker-glm
+      select:
+        harness: command-jsonl
+        execution: container
+  comparisons:
+    - name: command-vs-direct
+      baseline: direct-glm
+      candidate: command-glm
+    - name: docker-vs-direct
+      baseline: direct-glm
+      candidate: docker-glm
+
+repeats: 1
+diagnostics:
+  trajectory:
+    enabled: true
+    max_prefixes_per_case: 3
+bounds:
+  max_arms: 3
+  max_cases: 60
+  max_concurrency: 4
+  run_seconds: 7200
+  max_model_requests: 900
+  max_output_tokens: 650000

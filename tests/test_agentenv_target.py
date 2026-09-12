@@ -155,9 +155,7 @@ def test_agentenv_uses_one_sandbox_and_verifies_before_destroy() -> None:
             if path.endswith("turn-1-request.json")
         )
         assert turn_request["target_instructions"] == "Use the selected prompt."
-        assert turn_request["fixture"] == [
-            {"name": "account_tier", "value": "priority"}
-        ]
+        assert turn_request["fixture"] == [{"name": "account_tier", "value": "priority"}]
 
     asyncio.run(exercise())
 

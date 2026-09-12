@@ -546,9 +546,7 @@ def _compile_arm(
         observer_model=catalog.models[observer.model],
         target_model=catalog.models[target_component.model],
         target=target,
-        target_max_output_tokens_per_turn=catalog.models[
-            target_component.model
-        ].options.max_tokens,
+        target_max_output_tokens_per_turn=catalog.models[target_component.model].options.max_tokens,
         prompts=prompts,
         fixture=ResolvedFixture(
             name=choices.fixture,
@@ -704,9 +702,7 @@ def _resolve_target(
         return target.model_copy(
             update={
                 "name": name,
-                "guest_env": tuple(
-                    dict.fromkeys((*harness.guest_environment, *credential_names))
-                ),
+                "guest_env": tuple(dict.fromkeys((*harness.guest_environment, *credential_names))),
             }
         )
     raise AssertionError(f"unhandled harness target: {target}")

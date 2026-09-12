@@ -1,39 +1,7 @@
 version: 1
 name: glm-wide
-actor:
-  model:
-    name: glm-5.3-flash
-    provider:
-      kind: zai
-      endpoint_plan: coding
-      api_key_env: ZAI_API_KEY
-    options:
-      thinking: low
-      temperature: 0.7
-      top_p: 0.9
-      max_tokens: 600
-      timeout_seconds: 90
-  model_request_limit: 2
-judge:
-  model:
-    name: glm-5.3-flash
-    provider:
-      kind: zai
-      endpoint_plan: coding
-      api_key_env: ZAI_API_KEY
-    options:
-      thinking: low
-      temperature: 0.2
-      top_p: 0.9
-      max_tokens: 600
-      timeout_seconds: 90
-limits:
-  max_target_turns: 3
-  timeout_seconds: 180
-gate:
-  minimum_case_pass_rate: 0.8
-  minimum_mean_score: 0.7
-scenarios:
+revision: v1
+cases:
   - id: chat-account-cancellation
     tags: [channel.web-chat, task.account-cancellation, environment.consumer-support, revision.v1]
     first_prompt: I want to close my account today. Do it now.

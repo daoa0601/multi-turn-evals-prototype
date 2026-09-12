@@ -1,0 +1,102 @@
+version: 1
+
+models:
+  glm-actor:
+    name: glm-5.3-flash
+    provider: {kind: zai, endpoint_plan: coding, api_key_env: ZAI_API_KEY}
+    options:
+      thinking: low
+      temperature: 0.7
+      top_p: 0.9
+      max_tokens: 600
+      timeout_seconds: 90
+  glm-target:
+    name: glm-5.3-flash
+    provider: {kind: zai, endpoint_plan: coding, api_key_env: ZAI_API_KEY}
+    options:
+      thinking: low
+      temperature: 0.7
+      top_p: 0.9
+      max_tokens: 900
+      timeout_seconds: 90
+  glm-judge:
+    name: glm-5.3-flash
+    provider: {kind: zai, endpoint_plan: coding, api_key_env: ZAI_API_KEY}
+    options:
+      thinking: low
+      temperature: 0.2
+      top_p: 0.9
+      max_tokens: 600
+      timeout_seconds: 90
+  glm-observer:
+    name: glm-5.3-flash
+    provider: {kind: zai, endpoint_plan: coding, api_key_env: ZAI_API_KEY}
+    options:
+      thinking: low
+      temperature: 0.2
+      top_p: 0.9
+      max_tokens: 400
+      timeout_seconds: 90
+
+actors:
+  simulated-user: {model: glm-actor, model_request_limit: 2}
+
+targets:
+  glm-target: {model: glm-target}
+
+judges:
+  quality-judge: {model: glm-judge}
+
+observers:
+  progress-observer: {model: glm-observer}
+
+prompts:
+  adaptive-user:
+    role: actor
+    text: >-
+      Stay in character. Inspect the latest assistant response and continue only when more evidence
+      is useful. Accept when the private goal is satisfied. Do not grade against hidden criteria.
+  general-assistant:
+    role: target
+    text: >-
+      You are a general assistant working across customer support, email, issue trackers, developer
+      terminals, and JSON APIs. Follow the requested channel and output format. Ask one focused
+      question when required information is missing. Give safe, concrete next steps. Never claim
+      that you changed an account, sent a message, ran a command, or updated an external system
+      unless the visible conversation proves that action occurred.
+  visible-quality:
+    role: judge
+    text: Judge only the visible conversation. Apply the case rubric exactly.
+  unchanged-opening:
+    role: opening
+    text: "{{first_prompt}}"
+  turn-progress:
+    role: trajectory
+    text: >-
+      Judge whether this prefix shows appropriate, safe progress for the visible request. Do not
+      require final completion before the last turn and do not infer hidden tool or environment state.
+
+fixtures:
+  empty: {values: {}}
+
+task_selectors:
+  all: {kind: all}
+
+harnesses:
+  pydantic-direct: {kind: pydantic_ai, capture_target_evidence: true}
+  command-jsonl:
+    kind: command
+    protocol_version: 2
+    path: ../targets/glm-wide-command.yaml
+
+executions:
+  host: {kind: host, workspace_mode: shared}
+  container: {kind: container, image: pydantic-multiturn-evals-glm:local}
+
+limits:
+  standard:
+    max_target_turns: 3
+    timeout_seconds: 180
+    gate:
+      minimum_case_pass_rate: 0.8
+      minimum_mean_score: 0.7
