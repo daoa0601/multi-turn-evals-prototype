@@ -36,6 +36,10 @@ Cancellation writes `interrupted.json`. Resume skips every terminal case. A stal
 marked interrupted rather than replayed because a transcript cannot prove whether an external side
 effect already occurred.
 
+Task failures such as a scenario deadline remain durable completed receipts, but they fail the arm
+regardless of its minimum quality pass rate. `execution_failed` is reserved for coordinator or
+adapter exceptions outside the evaluated task.
+
 The plan caps arms, cases, global concurrency, wall time, model requests, and reserved output tokens.
 The 60-case GLM plan reserves 780 model requests and 486,000 possible output tokens, including up to
 three post-task trajectory observations per case. These are admission bounds, not claims about actual

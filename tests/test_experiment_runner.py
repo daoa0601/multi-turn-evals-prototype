@@ -17,6 +17,7 @@ from pydantic_multiturn_evals.experiment_runner import (
     save_new_experiment,
     summarize_experiment,
 )
+from pydantic_multiturn_evals.models import CommandTargetSpec
 from tests.helpers.model_binding import fake_model_binding
 
 ROOT = Path(__file__).parents[1]
@@ -123,8 +124,12 @@ def test_plan_and_summary_are_readable_json_artifacts(tmp_path: Path) -> None:
     assert saved_plan["experiment_name"] == "support-ab"
     command_arm = next(arm for arm in saved_plan["arms"] if arm["target"]["kind"] == "command")
     frozen_cwd = Path(command_arm["target"]["cwd"])
-    assert frozen_cwd.is_relative_to(output)
-    assert (frozen_cwd / "examples" / "glm_jsonl_harness.py").exists()
+    assert frozen_cwd == Path("frozen-workspaces/0001")
+    assert (output / frozen_cwd / "examples" / "glm_jsonl_harness.py").exists()
+    loaded = load_saved_experiment(output)
+    loaded_command = next(arm for arm in loaded.arms if arm.target.kind == "command")
+    assert isinstance(loaded_command.target, CommandTargetSpec)
+    assert loaded_command.target.cwd == (output / frozen_cwd).resolve()
     assert summary.pending == experiment.reservation.case_count
     assert saved_summary["pending"] == experiment.reservation.case_count
 
@@ -146,6 +151,37 @@ def test_execution_failure_is_terminal_across_resume(tmp_path: Path) -> None:
     assert first.execution_failed == experiment.reservation.case_count
     assert second.execution_failed == first.execution_failed
     assert calls == experiment.reservation.case_count
+
+
+def test_task_failure_fails_an_arm_even_when_its_pass_rate_meets_the_threshold(
+    tmp_path: Path,
+) -> None:
+    wide = compile_experiment(ROOT / "experiments" / "glm-wide.yaml")
+    arm = wide.arms[0]
+    arm = arm.model_copy(update={"cases": arm.cases[:5]})
+    experiment = wide.model_copy(update={"arms": (arm,), "comparisons": ()})
+    output = tmp_path / "run"
+    save_new_experiment(experiment, output)
+    calls = 0
+
+    async def fake_executor(plan, arm, case, directory):
+        nonlocal calls
+        calls += 1
+        return ExperimentCaseResult(
+            key=case.key,
+            passed=calls != 1,
+            score=None if calls == 1 else 1,
+            run_id=None if calls == 1 else f"run-{calls}",
+            duration_seconds=0.01,
+            task_failed=calls == 1,
+        )
+
+    summary = asyncio.run(execute_experiment(experiment, output, executor=fake_executor))
+
+    assert summary.arms[0].case_pass_rate == 0.8
+    assert summary.arms[0].task_failed == 1
+    assert summary.arms[0].passed is False
+    assert summary.passed is False
 
 
 def test_run_deadline_marks_active_cases_interrupted(tmp_path: Path) -> None:

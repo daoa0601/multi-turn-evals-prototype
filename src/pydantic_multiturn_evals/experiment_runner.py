@@ -139,11 +139,12 @@ def save_new_experiment(plan: ExperimentPlan, directory: Path) -> None:
 def load_saved_experiment(directory: Path) -> ExperimentPlan:
     path = directory / "plan.json"
     try:
-        return ExperimentPlan.model_validate_json(path.read_text(encoding="utf-8"))
+        plan = ExperimentPlan.model_validate_json(path.read_text(encoding="utf-8"))
     except OSError as error:
         raise ValueError(f"could not read saved experiment plan {path}: {error}") from error
     except ValidationError as error:
         raise ValueError(f"invalid saved experiment plan {path}:\n{error}") from error
+    return _resolve_saved_workspaces(plan, directory)
 
 
 @contextmanager
@@ -485,10 +486,28 @@ def _freeze_command_workspaces(plan: ExperimentPlan, directory: Path) -> Experim
             argv = (str((source / executable).resolve()), *target.argv[1:])
         frozen_arms.append(
             arm.model_copy(
-                update={"target": target.model_copy(update={"cwd": destination, "argv": argv})}
+                update={
+                    "target": target.model_copy(
+                        update={
+                            "cwd": destination.relative_to(directory),
+                            "argv": argv,
+                        }
+                    )
+                }
             )
         )
     return plan.model_copy(update={"arms": tuple(frozen_arms)})
+
+
+def _resolve_saved_workspaces(plan: ExperimentPlan, directory: Path) -> ExperimentPlan:
+    arms: list[SessionArmPlan] = []
+    for arm in plan.arms:
+        target = arm.target
+        if isinstance(target, CommandTargetSpec) and not target.cwd.is_absolute():
+            target = target.model_copy(update={"cwd": (directory / target.cwd).resolve()})
+            arm = arm.model_copy(update={"target": target})
+        arms.append(arm)
+    return plan.model_copy(update={"arms": tuple(arms)})
 
 
 def _preflight_target(
@@ -583,6 +602,7 @@ def _summarize_arm(
     gate = arm.suite.gate
     passed = (
         len(results) == len(keys)
+        and task_failed == 0
         and counts.get("failure", 0) == 0
         and counts.get("interrupted", 0) == 0
         and case_pass_rate >= gate.minimum_case_pass_rate
