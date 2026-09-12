@@ -22,6 +22,28 @@ def test_validate_command_needs_no_provider_key(capsys: object) -> None:
     assert exit_code == 0
 
 
+def test_plan_compiles_an_experiment_without_provider_credentials(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    for name in ("ZAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    output = tmp_path / "planned"
+
+    exit_code = main(
+        [
+            "plan",
+            str(ROOT / "experiments" / "support-ab.yaml"),
+            "--out",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert (output / "plan.json").exists()
+    assert (output / "summary.json").exists()
+
+
 def test_compare_command_requires_two_named_configs() -> None:
     args = build_parser().parse_args(
         [

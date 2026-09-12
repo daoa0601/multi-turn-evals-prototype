@@ -11,6 +11,14 @@ from pathlib import Path
 
 from pydantic_multiturn_evals.comparison import compare_suite
 from pydantic_multiturn_evals.evaluation import evaluate_suite
+from pydantic_multiturn_evals.experiment import compile_experiment
+from pydantic_multiturn_evals.experiment_runner import (
+    execute_experiment,
+    experiment_lock,
+    load_saved_experiment,
+    preflight_experiment,
+    save_new_experiment,
+)
 from pydantic_multiturn_evals.harbor_runner import compare_harbor_suite, load_harbor_arm
 from pydantic_multiturn_evals.observability import NO_TRACE, TraceRuntime, enable_langfuse
 from pydantic_multiturn_evals.spec import load_suite, load_target
@@ -24,6 +32,20 @@ def build_parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate", help="validate suite and target YAML")
     validate.add_argument("suite", type=Path)
     validate.add_argument("--target", type=Path)
+
+    plan = commands.add_parser("plan", help="compile an experiment into a frozen run plan")
+    plan.add_argument("experiment", type=Path)
+    plan.add_argument("--out", type=Path, required=True)
+
+    experiment_run = commands.add_parser(
+        "experiment-run", help="execute a previously compiled experiment"
+    )
+    experiment_run.add_argument("directory", type=Path)
+
+    resume = commands.add_parser(
+        "resume", help="continue pending work from a previously compiled experiment"
+    )
+    resume.add_argument("directory", type=Path)
 
     run = commands.add_parser("run", help="run and judge an adaptive scenario suite")
     run.add_argument("suite", type=Path)
@@ -74,7 +96,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run(args)
         if args.command == "compare":
             return _compare(args)
-        return _harbor_compare(args)
+        if args.command == "harbor-compare":
+            return _harbor_compare(args)
+        if args.command == "plan":
+            return _plan_experiment(args)
+        return _run_experiment(args)
     except (OSError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -138,6 +164,26 @@ def _compare(args: argparse.Namespace) -> int:
 
 def _trace_runtime(enabled: bool) -> TraceRuntime:
     return enable_langfuse() if enabled else NO_TRACE
+
+
+def _plan_experiment(args: argparse.Namespace) -> int:
+    plan = compile_experiment(args.experiment)
+    output = args.out.resolve()
+    with experiment_lock(output):
+        save_new_experiment(plan, output)
+    print(plan.reservation.model_dump_json(indent=2))
+    print(f"wrote frozen experiment plan to {output}")
+    return 0
+
+
+def _run_experiment(args: argparse.Namespace) -> int:
+    output = args.directory.resolve()
+    with experiment_lock(output):
+        plan = load_saved_experiment(output)
+        preflight_experiment(plan)
+        summary = asyncio.run(execute_experiment(plan, output))
+    print(summary.model_dump_json(indent=2))
+    return 0 if summary.passed else 1
 
 
 def _harbor_compare(args: argparse.Namespace) -> int:
