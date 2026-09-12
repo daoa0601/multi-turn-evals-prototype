@@ -213,6 +213,8 @@ def test_default_executor_runs_target_actor_judge_and_observer_from_the_arm(
         "judge",
         "observer",
     ]
+    assert all(model.reported_model is None for model in receipt.requested_models)
+    assert all(model.usage_status == "unavailable" for model in receipt.requested_models)
     assert (
         json.loads((result_path / "trajectory.jsonl").read_text())["assessment"]["status"]
         == "complete"

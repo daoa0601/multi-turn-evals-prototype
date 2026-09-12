@@ -51,6 +51,11 @@ class RequestedModel(StrictModel):
     role: Literal["actor", "target", "judge", "observer"]
     provider: str
     model: str
+    reported_model: str | None = None
+    usage_status: Literal["reported", "partial", "unavailable"] = "unavailable"
+    requests: int | None = Field(default=None, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
 
 
 class ExperimentCaseResult(StrictModel):
