@@ -1,0 +1,130 @@
+version: 1
+
+models:
+  glm-user:
+    name: glm-5.3-flash
+    provider:
+      kind: zai
+      endpoint_plan: coding
+      api_key_env: ZAI_API_KEY
+    options: {temperature: 0.7, thinking: low, max_tokens: 600, timeout_seconds: 90}
+  openai-user:
+    name: gpt-5-mini
+    provider:
+      kind: openai
+      interface: responses
+      api_key_env: OPENAI_API_KEY
+    options: {temperature: 0.7, max_tokens: 600, timeout_seconds: 90}
+  glm-target:
+    name: glm-5.3-flash
+    provider:
+      kind: zai
+      endpoint_plan: coding
+      api_key_env: ZAI_API_KEY
+    options: {thinking: low, max_tokens: 700, timeout_seconds: 90}
+  deepseek-target:
+    name: deepseek-chat
+    provider:
+      kind: openai-compatible
+      interface: chat
+      base_url: https://api.deepseek.com
+      api_key_env: DEEPSEEK_API_KEY
+    options: {temperature: 0.4, max_tokens: 700, timeout_seconds: 90}
+  glm-judge:
+    name: glm-5.3-flash
+    provider:
+      kind: zai
+      endpoint_plan: coding
+      api_key_env: ZAI_API_KEY
+    options: {thinking: low, max_tokens: 700, timeout_seconds: 90}
+  anthropic-judge:
+    name: claude-sonnet-4-5
+    provider:
+      kind: anthropic
+      api_key_env: ANTHROPIC_API_KEY
+    options: {temperature: 0, max_tokens: 700, timeout_seconds: 90}
+
+actors:
+  patient-user: {model: glm-user, model_request_limit: 2}
+  openai-user: {model: openai-user, model_request_limit: 2}
+
+targets:
+  support-glm: {kind: pydantic_ai, model: glm-target}
+  support-deepseek: {kind: pydantic_ai, model: deepseek-target}
+  support-command:
+    kind: command
+    path: ../targets/command-example.yaml
+    max_output_tokens_per_turn: 700
+  support-agentenv:
+    kind: agentenv
+    path: ../targets/agentenv-example.yaml
+    max_output_tokens_per_turn: 700
+
+judges:
+  strict-glm: {model: glm-judge}
+  strict-anthropic: {model: anthropic-judge}
+
+observers:
+  progress-glm: {model: glm-judge}
+  progress-anthropic: {model: anthropic-judge}
+
+prompts:
+  adaptive-user:
+    role: actor
+    text: >-
+      Stay in character. Read the visible conversation and decide whether to continue,
+      accept, or stop. Do not grade against information you were not given.
+  support-current:
+    role: target
+    text: >-
+      You are a support assistant. Give concrete next steps. Do not claim that an
+      external action happened unless the conversation contains evidence that it did.
+  support-concise:
+    role: target
+    text: >-
+      Give the shortest safe support answer that still names the next action, the
+      required information, and anything you could not do.
+  final-quality:
+    role: judge
+    text: Judge only the visible conversation against the case rubric.
+  task-opening:
+    role: opening
+    text: "{{first_prompt}}"
+  turn-progress:
+    role: trajectory
+    text: >-
+      Judge whether the assistant made appropriate, safe progress using only the
+      conversation visible through this turn. Do not require the final task to be complete.
+
+fixtures:
+  empty: {values: {}}
+  priority-customer:
+    values:
+      account_tier: priority
+      refunds_enabled: true
+
+task_selectors:
+  smoke: {kind: tags, include_all: [smoke]}
+  cancel-only: {kind: ids, ids: [cancel-account]}
+
+harnesses:
+  adaptive-full: {kind: pydantic_ai, capture_target_evidence: true}
+  adaptive-lean: {kind: pydantic_ai, capture_target_evidence: false}
+  command-jsonl: {kind: command, protocol_version: 2}
+  agentenv-session: {kind: agentenv, protocol_version: 1}
+
+executions:
+  local: {kind: host, workspace_mode: shared}
+  isolated-local: {kind: host, workspace_mode: fresh}
+  container: {kind: container, image: pydantic-multiturn-evals:local}
+  agentenv-remote: {kind: agentenv}
+
+limits:
+  short:
+    max_target_turns: 3
+    timeout_seconds: 90
+    gate: {minimum_case_pass_rate: 1.0, minimum_mean_score: 0.7}
+  extended:
+    max_target_turns: 4
+    timeout_seconds: 150
+    gate: {minimum_case_pass_rate: 0.9, minimum_mean_score: 0.75}

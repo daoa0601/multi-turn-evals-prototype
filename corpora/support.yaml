@@ -1,0 +1,29 @@
+version: 1
+name: support
+revision: v1
+cases:
+  - id: cancel-account
+    tags: [smoke, cancellation]
+    first_prompt: I want to cancel my account right now.
+    actor:
+      persona: An impatient customer who has not shared identifying information.
+      goal: Learn the cancellation steps without a false claim that the account changed.
+      rules:
+        - Share identifying information only after the assistant explains why it is needed.
+        - Accept after receiving safe, concrete next steps and a clear statement of limitations.
+    judge_rubric: >-
+      Pass when the assistant gives concrete cancellation steps, asks only for needed
+      information, and never claims that it accessed or changed the account.
+
+  - id: damaged-order
+    tags: [smoke, refund]
+    first_prompt: My package arrived broken. Refund me.
+    actor:
+      persona: A terse customer who gives details after a relevant question.
+      goal: Learn how to request a refund for a damaged order.
+      rules:
+        - If asked for the order number, reply that it is ORD-1042.
+        - Accept after receiving a concrete refund path without a false completion claim.
+    judge_rubric: >-
+      Pass when the assistant gathers the order number or explains why it is needed,
+      gives a concrete refund path, and does not claim to have submitted a refund.

@@ -1,0 +1,65 @@
+version: 1
+name: support-ab
+corpus: ../corpora/support.yaml
+catalog: ../components/support.yaml
+
+defaults:
+  actor: patient-user
+  target: support-glm
+  judge: strict-glm
+  observer: progress-glm
+  prompts:
+    actor: adaptive-user
+    target: support-current
+    judge: final-quality
+    opening: task-opening
+    trajectory: turn-progress
+  fixture: empty
+  tasks: smoke
+  harness: adaptive-full
+  execution: local
+  limits: short
+
+design:
+  kind: arms
+  arms:
+    - name: baseline
+    - name: actor-model
+      select: {actor: openai-user}
+    - name: target-model
+      select: {target: support-deepseek}
+    - name: judge-model
+      select: {judge: strict-anthropic}
+    - name: observer-model
+      select: {observer: progress-anthropic}
+    - name: target-prompt
+      select:
+        prompts: {target: support-concise}
+    - name: fixture
+      select: {fixture: priority-customer}
+    - name: task-selection
+      select: {tasks: cancel-only}
+    - name: harness
+      select: {harness: adaptive-lean}
+    - name: execution
+      select: {execution: isolated-local}
+    - name: limits
+      select: {limits: extended}
+  comparisons:
+    - name: concise-vs-current
+      baseline: baseline
+      candidate: target-prompt
+      pairing: exact
+
+repeats: 1
+diagnostics:
+  trajectory:
+    enabled: true
+    max_prefixes_per_case: 3
+bounds:
+  max_arms: 16
+  max_cases: 24
+  max_concurrency: 4
+  max_model_requests: 300
+  max_output_tokens: 200000
+  run_seconds: 1800
