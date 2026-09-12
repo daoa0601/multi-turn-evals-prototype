@@ -65,6 +65,9 @@ Each case gets a durable directory with the frozen input, normal evaluation arti
 diagnostics, and one terminal receipt. Resume skips completed and failed work. A case left with only
 `started.json` is marked interrupted instead of replaying a possibly state-changing interaction.
 Comparisons pair exact `(scenario_id, repeat_index)` corpus keys across arbitrary named arms.
+Harbor still uses its dedicated whole-job command. It is deliberately not selectable as a session
+harness until a Harbor plan can bind the selected target model and preserve the same frozen arm
+identity without pretending that a provider-specific Harbor agent is portable.
 
 ## Run the low-level two-target API
 
@@ -148,13 +151,14 @@ uploads the complete run directory even when the quality gate fails.
 [`targets/command-example.yaml`](targets/command-example.yaml) shows the command target format. `argv`
 is passed directly to `asyncio.create_subprocess_exec`; shell strings are not supported. `cwd`
 resolves relative to the target YAML. The child receives only names listed in `inherit_env`, and the
-configuration cannot contain environment values.
+experiment compiler adds the credential named by the selected target model. The configuration
+cannot contain environment values.
 
 One process is opened for each scenario and repeat. The runner writes one JSON object per line. The
 process first receives `start` and must answer `ready`:
 
 ```json
-{"protocol":2,"type":"start","session":{"suite":"support-smoke","target":"command-example","scenario_id":"refund-needs-order-number","repeat_index":1,"run_id":"...","comparison_id":null,"arm":null}}
+{"protocol":2,"type":"start","session":{"suite":"support-smoke","target":"command-example","scenario_id":"refund-needs-order-number","repeat_index":1,"run_id":"...","comparison_id":null,"arm":"baseline","target_model":{"name":"glm-5.3-flash","provider":{"kind":"zai"},"options":{"max_tokens":900,"timeout_seconds":90}},"target_instructions":"Give safe, concrete steps.","fixture":[]}}
 {"protocol":2,"type":"ready"}
 ```
 
