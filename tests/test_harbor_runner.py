@@ -37,6 +37,7 @@ from pydantic_multiturn_evals.models import (
     Transcript,
     UserTurn,
 )
+from tests.helpers.model_binding import fake_model_binding
 
 
 def suite() -> SuiteSpec:
@@ -197,8 +198,8 @@ def test_harbor_runs_two_jobs_and_combines_verifier_with_judge(
             candidate=candidate,
             work_directory=tmp_path / "work",
             backend_factory=lambda loaded: FakeBackend(rewards[loaded.spec.name], calls),
-            judge_model_factory=lambda _suite: TestModel(
-                custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9}
+            judge_binding_factory=lambda _suite: fake_model_binding(
+                TestModel(custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9})
             ),
             repeat=2,
             max_concurrency=3,

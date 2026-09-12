@@ -21,6 +21,7 @@ from pydantic_evals.evaluators import (
 )
 from pydantic_evals.reporting import EvaluationReport
 
+from pydantic_multiturn_evals.model_bindings import BoundModel, bind_model
 from pydantic_multiturn_evals.models import (
     CaseGate,
     CaseKey,
@@ -32,7 +33,7 @@ from pydantic_multiturn_evals.models import (
     TargetFailureEvidence,
 )
 from pydantic_multiturn_evals.observability import NO_TRACE, TraceFields, TraceRuntime
-from pydantic_multiturn_evals.providers import PydanticActor, build_model, model_settings
+from pydantic_multiturn_evals.providers import PydanticActor
 from pydantic_multiturn_evals.runner import (
     AdaptiveActor,
     RunnerServices,
@@ -76,10 +77,9 @@ class TranscriptJudge(Evaluator[PlannedCase, ScenarioResult, None]):
 def build_dataset(
     suite: SuiteSpec,
     *,
-    judge_model: Model,
+    judge_binding: BoundModel,
     repeat: int = 1,
 ) -> Dataset[PlannedCase, ScenarioResult, None]:
-    settings = model_settings(suite.judge.model)
     cases = [
         Case[PlannedCase, ScenarioResult, None](
             name=planned.case_name,
@@ -87,8 +87,8 @@ def build_dataset(
             evaluators=(
                 TranscriptJudge(
                     rubric=planned.scenario.judge_rubric,
-                    model=judge_model,
-                    settings=settings,
+                    model=judge_binding.model,
+                    settings=judge_binding.settings,
                 ),
             ),
         )
@@ -175,7 +175,7 @@ async def evaluate_suite(
     *,
     target: Target,
     actor: AdaptiveActor | None = None,
-    judge_model: Model | None = None,
+    judge_binding: BoundModel | None = None,
     state_store: StateStore | None = None,
     max_concurrency: int = 1,
     repeat: int = 1,
@@ -188,9 +188,9 @@ async def evaluate_suite(
 
     suite = source if isinstance(source, SuiteSpec) else load_suite(source)
     adaptive_actor = actor or PydanticActor(suite.actor)
-    evaluator_model = judge_model or build_model(suite.judge.model)
+    evaluator_binding = judge_binding or bind_model(suite.judge.model)
     services = RunnerServices(state_store=state_store or InMemoryStateStore())
-    dataset = build_dataset(suite, judge_model=evaluator_model, repeat=repeat)
+    dataset = build_dataset(suite, judge_binding=evaluator_binding, repeat=repeat)
 
     async def task(planned: PlannedCase) -> ScenarioResult:
         return await run_scenario(

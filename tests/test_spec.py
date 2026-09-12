@@ -6,6 +6,12 @@ import pytest
 from pydantic import ValidationError
 
 from pydantic_multiturn_evals.harbor_runner import load_harbor_arm
+from pydantic_multiturn_evals.model_bindings import (
+    CODING_ZAI_BASE_URL,
+    GENERAL_ZAI_BASE_URL,
+    bind_model,
+    zai_base_url,
+)
 from pydantic_multiturn_evals.models import (
     ActorBrief,
     AgentEnvTargetSpec,
@@ -13,12 +19,6 @@ from pydantic_multiturn_evals.models import (
     Scenario,
     SuiteSpec,
     ZAIProviderSpec,
-)
-from pydantic_multiturn_evals.providers import (
-    CODING_ZAI_BASE_URL,
-    GENERAL_ZAI_BASE_URL,
-    build_model,
-    zai_base_url,
 )
 from pydantic_multiturn_evals.spec import load_suite, load_target
 from pydantic_multiturn_evals.targets import build_target
@@ -38,6 +38,7 @@ def test_example_files_are_valid() -> None:
 
     assert len(suite.scenarios) == 2
     assert isinstance(target.spec, PydanticAITargetSpec)
+    assert isinstance(target.spec.model.provider, ZAIProviderSpec)
     assert target.spec.model.provider.endpoint_plan == "coding"
     assert candidate.spec.name == "support-candidate"
     assert command.spec.kind == "command"
@@ -98,4 +99,4 @@ def test_missing_key_names_the_variable_without_exposing_a_value(
     )
 
     with pytest.raises(ValueError, match="EVAL_TEST_ZAI_KEY is not set"):
-        build_model(spec)
+        bind_model(spec)

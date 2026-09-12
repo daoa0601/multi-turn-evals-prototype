@@ -16,6 +16,33 @@ verification, artifacts, concurrency, and sandbox teardown. It is not invoked on
 The target, simulated user, and judge examples use `glm-5.3-flash` through the Z.AI Coding Plan
 endpoint. Credentials come from environment variables, never YAML.
 
+## Choose model providers
+
+Every framework-owned model uses the same `ModelSpec`. The actor, target, and judge may select
+different providers. The provider and its request settings resolve together before a model call.
+
+```yaml
+model:
+  name: gpt-5.4
+  provider:
+    kind: openai
+    interface: responses
+    api_key_env: OPENAI_API_KEY
+  options:
+    thinking: high
+    max_tokens: 1200
+    timeout_seconds: 90
+```
+
+Supported provider kinds are `zai`, `openai`, `anthropic`, and `openai-compatible`. Z.AI keeps an
+explicit `endpoint_plan` because a Coding Plan credential must use its Coding Plan URL. A custom
+OpenAI-compatible route requires `base_url`, accepts either the `chat` or `responses` interface, and
+may omit `api_key_env` for a keyless local server.
+
+Common options are `temperature`, `top_p`, `thinking`, `max_tokens`, and `timeout_seconds`. Omitted
+sampling options stay absent from the provider request. The resolver does not send Z.AI-specific
+fields to other providers.
+
 ## Run the checked-in A/B comparison
 
 ```console

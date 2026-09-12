@@ -19,6 +19,7 @@ from pydantic_multiturn_evals.models import (
 )
 from pydantic_multiturn_evals.runner import ActorView
 from pydantic_multiturn_evals.spec import LoadedTarget
+from tests.helpers.model_binding import fake_model_binding
 
 ROOT = Path(__file__).parents[1]
 HARNESS = ROOT / "tests" / "helpers" / "command_harness.py"
@@ -75,7 +76,9 @@ def test_comparison_runs_both_arms_and_pairs_every_repeat(tmp_path: Path, monkey
             baseline=loaded("baseline", "BASELINE_VARIANT"),
             candidate=loaded("candidate", "CANDIDATE_VARIANT"),
             actor_factory=lambda _suite: AcceptingActor(),
-            judge_model_factory=lambda _suite: TestModel(custom_output_args=next(judge_outputs)),
+            judge_binding_factory=lambda _suite: fake_model_binding(
+                TestModel(custom_output_args=next(judge_outputs))
+            ),
             repeat=2,
             progress=False,
         )

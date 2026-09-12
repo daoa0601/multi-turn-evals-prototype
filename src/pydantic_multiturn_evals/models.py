@@ -6,7 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+    model_validator,
+)
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Identifier = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*$")]
@@ -203,21 +211,46 @@ class Scenario(StrictModel):
 
 
 class ZAIProviderSpec(StrictModel):
+    kind: Literal["zai"] = "zai"
     endpoint_plan: Literal["general", "coding"] = "coding"
     api_key_env: EnvironmentName = "ZAI_API_KEY"
 
 
+class OpenAIProviderSpec(StrictModel):
+    kind: Literal["openai"] = "openai"
+    interface: Literal["responses", "chat"] = "responses"
+    api_key_env: EnvironmentName = "OPENAI_API_KEY"
+
+
+class AnthropicProviderSpec(StrictModel):
+    kind: Literal["anthropic"] = "anthropic"
+    api_key_env: EnvironmentName = "ANTHROPIC_API_KEY"
+
+
+class OpenAICompatibleProviderSpec(StrictModel):
+    kind: Literal["openai-compatible"] = "openai-compatible"
+    interface: Literal["responses", "chat"] = "chat"
+    base_url: AnyHttpUrl
+    api_key_env: EnvironmentName | None = None
+
+
+ProviderSpec: TypeAlias = Annotated[
+    ZAIProviderSpec | OpenAIProviderSpec | AnthropicProviderSpec | OpenAICompatibleProviderSpec,
+    Field(discriminator="kind"),
+]
+
+
 class ModelOptions(StrictModel):
-    temperature: float = Field(default=1.0, ge=0, le=2)
-    top_p: float = Field(default=0.95, gt=0, le=1)
-    reasoning_effort: Literal["low", "high", "max"] = "low"
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    thinking: bool | Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     max_tokens: int = Field(default=2048, ge=1, le=131072)
     timeout_seconds: float = Field(default=90, gt=0, le=600)
 
 
 class ModelSpec(StrictModel):
     name: Text = "glm-5.3-flash"
-    provider: ZAIProviderSpec = ZAIProviderSpec()
+    provider: ProviderSpec = ZAIProviderSpec()
     options: ModelOptions = ModelOptions()
 
 

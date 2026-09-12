@@ -27,6 +27,7 @@ from pydantic_multiturn_evals.models import (
     TargetReply,
 )
 from pydantic_multiturn_evals.runner import ActorView, ConversationView
+from tests.helpers.model_binding import fake_model_binding
 
 
 class AcceptingActor:
@@ -110,7 +111,7 @@ def test_pydantic_report_drives_a_passing_gate_and_artifacts(tmp_path: Path) -> 
             suite(),
             target=helpful_target(),
             actor=AcceptingActor(),
-            judge_model=judge,
+            judge_binding=fake_model_binding(judge),
             progress=False,
         )
     )
@@ -137,7 +138,7 @@ def test_gate_fails_when_the_judge_score_misses_the_suite_threshold() -> None:
             suite(minimum_score=0.8),
             target=helpful_target(),
             actor=AcceptingActor(),
-            judge_model=judge,
+            judge_binding=fake_model_binding(judge),
             progress=False,
         )
     )
@@ -155,7 +156,7 @@ def test_target_error_becomes_a_failed_pydantic_case() -> None:
             suite(),
             target=EvalTarget(broken_target),
             actor=AcceptingActor(),
-            judge_model=TestModel(),
+            judge_binding=fake_model_binding(TestModel()),
             progress=False,
         )
     )
@@ -185,7 +186,7 @@ def test_environment_verification_is_a_gate_but_not_judge_input(tmp_path: Path) 
             suite(),
             target=target,
             actor=AcceptingActor(),
-            judge_model=judge,
+            judge_binding=fake_model_binding(judge),
             progress=False,
         )
     )

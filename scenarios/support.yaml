@@ -4,20 +4,22 @@ actor:
   model:
     name: glm-5.3-flash
     provider:
+      kind: zai
       endpoint_plan: coding
       api_key_env: ZAI_API_KEY
     options:
-      reasoning_effort: low
+      thinking: low
       max_tokens: 700
   model_request_limit: 2
 judge:
   model:
     name: glm-5.3-flash
     provider:
+      kind: zai
       endpoint_plan: coding
       api_key_env: ZAI_API_KEY
     options:
-      reasoning_effort: low
+      thinking: low
       max_tokens: 700
 limits:
   max_target_turns: 3

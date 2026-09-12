@@ -16,7 +16,6 @@ from uuid import uuid4
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from pydantic_ai.models import Model
 
 from pydantic_multiturn_evals.comparison import (
     ComparisonResult,
@@ -29,6 +28,7 @@ from pydantic_multiturn_evals.evaluation import (
     derive_gate,
     plan_cases,
 )
+from pydantic_multiturn_evals.model_bindings import BoundModel, bind_model
 from pydantic_multiturn_evals.models import (
     CaseKey,
     EnvironmentEvidence,
@@ -44,7 +44,6 @@ from pydantic_multiturn_evals.models import (
     Text,
 )
 from pydantic_multiturn_evals.observability import NO_TRACE, TraceFields, TraceRuntime
-from pydantic_multiturn_evals.providers import build_model
 from pydantic_multiturn_evals.spec import load_suite
 
 HARBOR_USER_AGENT = "pydantic_multiturn_harbor_agent:PydanticAdaptiveUserAgent"
@@ -166,7 +165,7 @@ class HarborArmRunner:
         repeat: int,
         max_concurrency: int,
         progress: bool,
-        judge_model: Model,
+        judge_binding: BoundModel,
         work_directory: Path,
         trace: TraceRuntime,
     ) -> CompletedArm:
@@ -185,7 +184,7 @@ class HarborArmRunner:
             plan=plan,
             receipt=receipt,
             spec=self._loaded.spec,
-            judge_model=judge_model,
+            judge_binding=judge_binding,
             progress=progress,
             trace=trace,
         )
@@ -198,7 +197,7 @@ class HarborArmRunner:
 
 
 BackendFactory = Callable[[LoadedHarborArm], HarborBackend]
-JudgeModelFactory = Callable[[SuiteSpec], Model]
+JudgeBindingFactory = Callable[[SuiteSpec], BoundModel]
 
 
 async def compare_harbor_suite(
@@ -208,7 +207,7 @@ async def compare_harbor_suite(
     candidate: LoadedHarborArm,
     work_directory: Path,
     backend_factory: BackendFactory | None = None,
-    judge_model_factory: JudgeModelFactory | None = None,
+    judge_binding_factory: JudgeBindingFactory | None = None,
     max_concurrency: int = 1,
     repeat: int = 1,
     progress: bool = True,
@@ -226,7 +225,7 @@ async def compare_harbor_suite(
     make_backend = backend_factory or (
         lambda loaded: HarborCliBackend(loaded.spec, loaded.source_directory)
     )
-    make_judge = judge_model_factory or (lambda value: build_model(value.judge.model))
+    make_judge = judge_binding_factory or (lambda value: bind_model(value.judge.model))
     comparison_id = uuid4().hex
     fields = TraceFields(suite=suite.name, comparison_id=comparison_id)
 
@@ -238,7 +237,7 @@ async def compare_harbor_suite(
             repeat=repeat,
             max_concurrency=max_concurrency,
             progress=progress,
-            judge_model=make_judge(suite),
+            judge_binding=make_judge(suite),
             work_directory=work_directory / "baseline",
             trace=trace,
         )
@@ -249,7 +248,7 @@ async def compare_harbor_suite(
             repeat=repeat,
             max_concurrency=max_concurrency,
             progress=progress,
-            judge_model=make_judge(suite),
+            judge_binding=make_judge(suite),
             work_directory=work_directory / "candidate",
             trace=trace,
         )
@@ -463,7 +462,7 @@ async def _normalize_harbor_job(
     plan: HarborJobPlan,
     receipt: HarborJobReceipt,
     spec: HarborArmSpec,
-    judge_model: Model,
+    judge_binding: BoundModel,
     progress: bool,
     trace: TraceRuntime,
 ) -> SuiteResult:
@@ -577,7 +576,7 @@ async def _normalize_harbor_job(
                     )
             return value
 
-    dataset = build_dataset(suite, judge_model=judge_model, repeat=_repeat_count(plan.cases))
+    dataset = build_dataset(suite, judge_binding=judge_binding, repeat=_repeat_count(plan.cases))
     fields = TraceFields(
         suite=suite.name,
         target=plan.arm_name,

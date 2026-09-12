@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 from pydantic_ai.models.test import TestModel
 
 import pydantic_multiturn_evals.providers as providers
@@ -13,16 +12,15 @@ from pydantic_multiturn_evals.models import (
     CaseKey,
     ConversationView,
     Exchange,
-    ModelSpec,
     PydanticAITargetSpec,
     SessionContext,
     UserTurn,
-    ZAIProviderSpec,
 )
 from pydantic_multiturn_evals.runner import ActorView
+from tests.helpers.model_binding import fake_model_binding
 
 
-def test_pydantic_actor_returns_a_validated_decision(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pydantic_actor_returns_a_validated_decision() -> None:
     fake_model = TestModel(
         custom_output_args={
             "kind": "accept",
@@ -30,8 +28,7 @@ def test_pydantic_actor_returns_a_validated_decision(monkeypatch: pytest.MonkeyP
             "next_user_message": None,
         }
     )
-    monkeypatch.setattr(providers, "build_model", lambda spec: fake_model)
-    actor = providers.PydanticActor(ActorSpec())
+    actor = providers.PydanticActor(ActorSpec(), model_binding=fake_model_binding(fake_model))
 
     decision = asyncio.run(
         actor.decide(
@@ -52,19 +49,16 @@ def test_pydantic_actor_returns_a_validated_decision(monkeypatch: pytest.MonkeyP
     assert decision.kind == "accept"
 
 
-def test_pydantic_target_accepts_complete_history(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        providers,
-        "build_model",
-        lambda spec: TestModel(custom_output_text="A response from the fake target."),
-    )
+def test_pydantic_target_accepts_complete_history() -> None:
+    fake_model = TestModel(custom_output_text="A response from the fake target.")
     target = providers.PydanticAITarget(
         PydanticAITargetSpec(
             version=1,
             name="test-target",
             kind="pydantic_ai",
             instructions="Help the user.",
-        )
+        ),
+        model_binding=fake_model_binding(fake_model),
     )
     view = ConversationView(
         run_id="run-1",
@@ -91,17 +85,3 @@ def test_pydantic_target_accepts_complete_history(monkeypatch: pytest.MonkeyPatc
             return (await session.reply(view)).assistant_text
 
     assert asyncio.run(exercise()) == "A response from the fake target."
-
-
-def test_build_model_uses_the_named_environment_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EVAL_TEST_ZAI_KEY", "not-a-real-key")
-    model = providers.build_model(
-        ModelSpec(provider=ZAIProviderSpec(endpoint_plan="coding", api_key_env="EVAL_TEST_ZAI_KEY"))
-    )
-
-    assert model.model_name == "glm-5.3-flash"
-
-
-def test_unknown_endpoint_plan_is_rejected() -> None:
-    with pytest.raises(ValueError, match="unsupported Z.AI endpoint plan"):
-        providers.zai_base_url("unknown")

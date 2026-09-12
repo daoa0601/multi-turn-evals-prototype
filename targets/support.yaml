@@ -4,10 +4,11 @@ kind: pydantic_ai
 model:
   name: glm-5.3-flash
   provider:
+    kind: zai
     endpoint_plan: coding
     api_key_env: ZAI_API_KEY
   options:
-    reasoning_effort: low
+    thinking: low
     max_tokens: 700
 instructions: >-
   You are a support assistant for a fictional service. You cannot inspect accounts, submit refunds,

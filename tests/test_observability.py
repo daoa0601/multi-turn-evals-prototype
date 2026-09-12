@@ -26,6 +26,7 @@ from pydantic_multiturn_evals.observability import (
     enable_langfuse,
 )
 from pydantic_multiturn_evals.runner import ActorView, ConversationView
+from tests.helpers.model_binding import fake_model_binding
 
 
 class RecordingSpan:
@@ -133,8 +134,8 @@ def test_trace_fields_identify_the_arm_case_and_harness_without_target_evidence(
             suite,
             target=OneReplyTarget(),
             actor=AcceptingActor(),
-            judge_model=TestModel(
-                custom_output_args={"reason": "Good.", "pass": True, "score": 0.9}
+            judge_binding=fake_model_binding(
+                TestModel(custom_output_args={"reason": "Good.", "pass": True, "score": 0.9})
             ),
             comparison_id="comparison-1",
             arm="candidate",

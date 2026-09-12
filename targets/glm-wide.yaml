@@ -4,10 +4,11 @@ kind: pydantic_ai
 model:
   name: glm-5.3-flash
   provider:
+    kind: zai
     endpoint_plan: coding
     api_key_env: ZAI_API_KEY
   options:
-    reasoning_effort: low
+    thinking: low
     temperature: 0.7
     top_p: 0.9
     max_tokens: 900

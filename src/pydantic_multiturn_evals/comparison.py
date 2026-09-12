@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
-from pydantic_ai.models import Model
-
 from pydantic_multiturn_evals.evaluation import evaluate_suite, plan_cases
+from pydantic_multiturn_evals.model_bindings import BoundModel, bind_model
 from pydantic_multiturn_evals.models import (
     CaseGate,
     CaseKey,
@@ -21,7 +20,7 @@ from pydantic_multiturn_evals.models import (
     SuiteSpec,
 )
 from pydantic_multiturn_evals.observability import NO_TRACE, TraceFields, TraceRuntime
-from pydantic_multiturn_evals.providers import PydanticActor, build_model
+from pydantic_multiturn_evals.providers import PydanticActor
 from pydantic_multiturn_evals.runner import AdaptiveActor
 from pydantic_multiturn_evals.spec import LoadedTarget, load_suite
 from pydantic_multiturn_evals.targets import build_target
@@ -128,7 +127,7 @@ class ComparisonResult:
 
 
 ActorFactory = Callable[[SuiteSpec], AdaptiveActor]
-JudgeModelFactory = Callable[[SuiteSpec], Model]
+JudgeBindingFactory = Callable[[SuiteSpec], BoundModel]
 
 
 async def compare_suite(
@@ -137,7 +136,7 @@ async def compare_suite(
     baseline: LoadedTarget,
     candidate: LoadedTarget,
     actor_factory: ActorFactory | None = None,
-    judge_model_factory: JudgeModelFactory | None = None,
+    judge_binding_factory: JudgeBindingFactory | None = None,
     max_concurrency: int = 1,
     repeat: int = 1,
     progress: bool = True,
@@ -151,7 +150,7 @@ async def compare_suite(
     baseline_target = build_target(baseline)
     candidate_target = build_target(candidate)
     make_actor = actor_factory or (lambda value: PydanticActor(value.actor))
-    make_judge = judge_model_factory or (lambda value: build_model(value.judge.model))
+    make_judge = judge_binding_factory or (lambda value: bind_model(value.judge.model))
     comparison_id = uuid4().hex
     fields = TraceFields(suite=suite.name, comparison_id=comparison_id)
 
@@ -160,7 +159,7 @@ async def compare_suite(
             suite,
             target=baseline_target,
             actor=make_actor(suite),
-            judge_model=make_judge(suite),
+            judge_binding=make_judge(suite),
             max_concurrency=max_concurrency,
             repeat=repeat,
             progress=progress,
@@ -172,7 +171,7 @@ async def compare_suite(
             suite,
             target=candidate_target,
             actor=make_actor(suite),
-            judge_model=make_judge(suite),
+            judge_binding=make_judge(suite),
             max_concurrency=max_concurrency,
             repeat=repeat,
             progress=progress,
