@@ -1,0 +1,52 @@
+version: 1
+name: glm-support-ab
+corpus: ../corpora/support.yaml
+catalog: ../components/support.yaml
+
+defaults:
+  actor: patient-user
+  target: support-glm
+  judge: strict-glm
+  observer: progress-glm
+  prompts:
+    actor: adaptive-user
+    target: support-current
+    judge: final-quality
+    opening: task-opening
+    trajectory: turn-progress
+  fixture: empty
+  tasks: smoke
+  harness: command-jsonl
+  execution: local
+  limits: short
+
+design:
+  kind: arms
+  arms:
+    - name: baseline
+    - name: concise-prompt
+      select:
+        prompts: {target: support-concise}
+    - name: priority-fixture
+      select:
+        fixture: priority-customer
+  comparisons:
+    - name: concise-vs-current
+      baseline: baseline
+      candidate: concise-prompt
+    - name: priority-vs-empty
+      baseline: baseline
+      candidate: priority-fixture
+
+repeats: 1
+diagnostics:
+  trajectory:
+    enabled: true
+    max_prefixes_per_case: 3
+bounds:
+  max_arms: 3
+  max_cases: 6
+  max_concurrency: 3
+  max_model_requests: 100
+  max_output_tokens: 80000
+  run_seconds: 1800
