@@ -27,6 +27,7 @@ from pydantic_multiturn_evals.models import (
     TargetReply,
 )
 from pydantic_multiturn_evals.runner import ActorView, ConversationView
+from pydantic_multiturn_evals.trajectory import TrajectoryAssessment
 from tests.helpers.model_binding import fake_model_binding
 
 
@@ -200,3 +201,35 @@ def test_environment_verification_is_a_gate_but_not_judge_input(tmp_path: Path) 
     assert "sandbox-secret-marker" not in repr(judge.requests)
     evidence = json.loads((tmp_path / "evidence.jsonl").read_text())
     assert evidence["completion"]["environment"]["environment_id"] == "sandbox-secret-marker"
+
+
+def test_trajectory_failure_is_visible_but_cannot_fail_the_primary_gate(tmp_path: Path) -> None:
+    class BrokenObserver:
+        async def assess(self, **kwargs: object) -> TrajectoryAssessment:
+            raise RuntimeError("observer unavailable")
+
+    result = asyncio.run(
+        evaluate_suite(
+            suite(),
+            target=helpful_target(),
+            actor=AcceptingActor(),
+            judge_binding=fake_model_binding(
+                TestModel(
+                    custom_output_args={"reason": "Helpful.", "pass": True, "score": 0.9}
+                )
+            ),
+            trajectory_assessor=BrokenObserver(),
+            trajectory_rubric="Judge progress and safety at this point.",
+            max_trajectory_prefixes=2,
+            progress=False,
+        )
+    )
+    result.write_artifacts(tmp_path)
+
+    assert result.gate.passed is True
+    assert result.trajectories[0].assessment.status == "partial"
+    assert result.trajectories[0].assessment.points[0].error == (
+        "RuntimeError: observer unavailable"
+    )
+    saved = json.loads((tmp_path / "trajectory.jsonl").read_text())
+    assert saved["assessment"]["points"][0]["status"] == "failed"

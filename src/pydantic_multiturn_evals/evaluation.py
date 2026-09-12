@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from dataclasses import dataclass, replace
@@ -42,6 +43,11 @@ from pydantic_multiturn_evals.runner import (
 from pydantic_multiturn_evals.spec import load_suite
 from pydantic_multiturn_evals.storage import InMemoryStateStore, StateStore
 from pydantic_multiturn_evals.targets import Target
+from pydantic_multiturn_evals.trajectory import (
+    CaseTrajectory,
+    TrajectoryAssessor,
+    assess_trajectory,
+)
 
 
 @dataclass
@@ -102,6 +108,7 @@ class SuiteResult:
     report: EvaluationReport[PlannedCase, ScenarioResult, None]
     gate: GateResult
     failure_evidence: tuple[TargetFailureEvidence, ...] = ()
+    trajectories: tuple[CaseTrajectory, ...] = ()
 
     def write_artifacts(self, directory: str | Path) -> None:
         output_directory = Path(directory)
@@ -154,6 +161,11 @@ class SuiteResult:
             output_directory / "evidence.jsonl",
             evidence_text + ("\n" if evidence_text else ""),
         )
+        trajectory_text = "\n".join(item.model_dump_json() for item in self.trajectories)
+        _write_text(
+            output_directory / "trajectory.jsonl",
+            trajectory_text + ("\n" if trajectory_text else ""),
+        )
 
 
 def plan_cases(suite: SuiteSpec, repeat: int) -> tuple[PlannedCase, ...]:
@@ -182,11 +194,16 @@ async def evaluate_suite(
     progress: bool = True,
     comparison_id: str | None = None,
     arm: Literal["baseline", "candidate"] | None = None,
+    trajectory_assessor: TrajectoryAssessor | None = None,
+    trajectory_rubric: str | None = None,
+    max_trajectory_prefixes: int = 4,
     trace: TraceRuntime = NO_TRACE,
 ) -> SuiteResult:
     """Load, run, judge, aggregate, and gate one adaptive scenario suite."""
 
     suite = source if isinstance(source, SuiteSpec) else load_suite(source)
+    if (trajectory_assessor is None) != (trajectory_rubric is None):
+        raise ValueError("trajectory assessor and rubric must be provided together")
     adaptive_actor = actor or PydanticActor(suite.actor)
     evaluator_binding = judge_binding or bind_model(suite.judge.model)
     services = RunnerServices(state_store=state_store or InMemoryStateStore())
@@ -247,11 +264,52 @@ async def evaluate_suite(
             passed=outcome.passed,
             reason=outcome.reason,
         )
+    trajectories = await _assess_trajectories(
+        report,
+        assessor=trajectory_assessor,
+        rubric=trajectory_rubric,
+        max_prefixes=max_trajectory_prefixes,
+        max_concurrency=max_concurrency,
+    )
     return SuiteResult(
         report=report,
         gate=gate,
         failure_evidence=target.failure_evidence(),
+        trajectories=trajectories,
     )
+
+
+async def _assess_trajectories(
+    report: EvaluationReport[PlannedCase, ScenarioResult, None],
+    *,
+    assessor: TrajectoryAssessor | None,
+    rubric: str | None,
+    max_prefixes: int,
+    max_concurrency: int,
+) -> tuple[CaseTrajectory, ...]:
+    if assessor is None or rubric is None:
+        return ()
+    if max_prefixes < 1:
+        raise ValueError("max_trajectory_prefixes must be positive")
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def assess_case(case: Any) -> CaseTrajectory:
+        async with semaphore:
+            assessment = await assess_trajectory(
+                case.output.transcript,
+                rubric=rubric,
+                assessor=assessor,
+                max_prefixes=max_prefixes,
+            )
+        return CaseTrajectory(
+            case_name=case.name,
+            scenario_id=case.output.scenario_id,
+            repeat_index=case.output.repeat_index,
+            assessment=assessment,
+        )
+
+    return tuple(await asyncio.gather(*(assess_case(case) for case in report.cases)))
 
 
 def derive_gate(
