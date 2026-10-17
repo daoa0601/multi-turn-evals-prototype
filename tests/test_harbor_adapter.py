@@ -670,8 +670,12 @@ raise SystemExit(1)
     assert isinstance(terminal, Failed)
     assert terminal.failure.phase == "execute"
     assert "without a trial result" in terminal.failure.message
-    assert "harbor exploded" in terminal.failure.message
+    assert "harbor exploded" not in terminal.failure.message
+    assert "harbor.stderr.txt" in terminal.failure.message
     assert terminal.evidence is not None
+    [stderr_artifact] = [a for a in terminal.evidence.artifacts if a.name.endswith("stderr.txt")]
+    [stderr_file] = (tmp_path / "run").rglob(stderr_artifact.path)
+    assert "harbor exploded" in stderr_file.read_text()
     assert [message.role for message in terminal.evidence.public.messages] == [
         "user",
         "assistant",

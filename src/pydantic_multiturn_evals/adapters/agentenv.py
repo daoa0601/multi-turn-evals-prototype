@@ -343,9 +343,7 @@ class _AgentEnvSession:
             raw = bytes(content) if isinstance(content, bytearray) else content.encode()
             total += len(raw)
             if total > self.target.artifact_bytes:
-                raise RuntimeError(
-                    f"AgentENV artifacts exceed {self.target.artifact_bytes} bytes"
-                )
+                raise RuntimeError(f"AgentENV artifacts exceed {self.target.artifact_bytes} bytes")
             destination = root / value.name
             destination.write_bytes(raw)
             artifacts.append(

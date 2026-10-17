@@ -197,8 +197,7 @@ def _campaign(config: ScaleConfig, meter: ConcurrencyMeter) -> Campaign:
     return Campaign(
         name="pydantic-scale",
         revision=(
-            f"c{config.cases}-s{config.samples}-w{config.workers}"
-            f"-d{config.model_delay_ms:g}ms"
+            f"c{config.cases}-s{config.samples}-w{config.workers}-d{config.model_delay_ms:g}ms"
         ),
         cases=cases,
         variants=variants,

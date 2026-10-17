@@ -56,10 +56,7 @@ def merge_reports(campaign: Campaign, roots: Sequence[Path]) -> Report:
         manifest, report = by_index[index]
         shard = manifest.shard
         assert shard is not None
-        expected = {
-            _key_identity(key)
-            for key, _case, _variant in _trials(campaign, shard)
-        }
+        expected = {_key_identity(key) for key, _case, _variant in _trials(campaign, shard)}
         actual = {_key_identity(result.key) for result in report.results}
         if len(actual) != len(report.results):
             raise ValueError(f"shard {index} contains duplicate trial results")

@@ -431,9 +431,7 @@ def _model_call(
         duration_seconds=duration_seconds,
         status=status,
         usage=usage,
-        provider_response_id=(
-            response.provider_response_id if response is not None else None
-        ),
+        provider_response_id=(response.provider_response_id if response is not None else None),
         error_type=type(error).__name__ if error is not None else None,
         error_message=(str(error) or repr(error))[:1000] if error is not None else None,
     )

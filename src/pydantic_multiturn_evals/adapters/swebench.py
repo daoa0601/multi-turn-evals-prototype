@@ -345,10 +345,7 @@ def _find_instance_report(root: Path, instance: str) -> Path | None:
 
 def _run_id(trial: Trial) -> str:
     key = trial.key
-    value = (
-        f"{key.campaign}-{key.revision}-{key.case}-{key.variant}"
-        f"-s{key.sample}-a{trial.attempt}"
-    )
+    value = f"{key.campaign}-{key.revision}-{key.case}-{key.variant}-s{key.sample}-a{trial.attempt}"
     if len(value) > 120:
         raise HarnessError("prepare", "SWE-bench trial identity exceeds 120 characters")
     return value

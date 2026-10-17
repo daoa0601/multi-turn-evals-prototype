@@ -245,9 +245,7 @@ class TemplarHarness:
                     cursor = sequence
                     stream.write(json.dumps(event, sort_keys=True) + "\n")
                     trace.record(LifecycleFact(phase="templar-event", detail=event_type))
-            view = _RunView.model_validate(
-                await self._json(client, "GET", f"/api/runs/{run_id}")
-            )
+            view = _RunView.model_validate(await self._json(client, "GET", f"/api/runs/{run_id}"))
             state["last_sequence"] = cursor
             state["status"] = view.status
             _write_json(state_path, state)

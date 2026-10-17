@@ -303,11 +303,11 @@ class HarborHarness:
 
         if result_path is None:
             messages = self._import_optional_trajectory(agent_dir, trial.directory, trace, chain)
-            detail = stderr.decode(errors="replace").strip()
+            # Stderr can echo prompts or credentials; it stays in its artifact, not the message.
             message = f"Harbor exited with code {process.returncode} without a trial result"
-            raise HarnessError(
-                "execute", message + (f": {detail}" if detail else ""), evidence=failure(messages)
-            )
+            if stderr:
+                message += f"; {len(stderr)} bytes of stderr in {stderr_path.name}"
+            raise HarnessError("execute", message, evidence=failure(messages))
 
         # The saved result is authoritative: read it before the optional
         # trajectory so a native failure is never hidden by a damaged transcript.

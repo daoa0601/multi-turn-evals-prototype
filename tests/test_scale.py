@@ -68,9 +68,7 @@ def test_shared_capacity_covers_execution_and_cleanup(tmp_path: Path) -> None:
         samples=3,
     )
 
-    report = asyncio.run(
-        run(campaign, directory=tmp_path, workers=6, capacities={"sandbox": 1})
-    )
+    report = asyncio.run(run(campaign, directory=tmp_path, workers=6, capacities={"sandbox": 1}))
 
     assert report.exit_code == 0
     assert maximum == 1
@@ -111,9 +109,7 @@ def test_capacity_wait_does_not_spend_the_case_budget(tmp_path: Path) -> None:
         ),
     )
 
-    report = asyncio.run(
-        run(campaign, directory=tmp_path, workers=2, capacities={"sandbox": 1})
-    )
+    report = asyncio.run(run(campaign, directory=tmp_path, workers=2, capacities={"sandbox": 1}))
 
     assert report.exit_code == 0
     assert all(result.passed for result in report.results)
@@ -184,8 +180,7 @@ def test_static_shards_keep_pairs_together_and_merge_exactly(tmp_path: Path) -> 
         name="shards",
         revision="1",
         cases=tuple(
-            Case(name=f"case-{index}", task="Run", required_checks=("done",))
-            for index in range(3)
+            Case(name=f"case-{index}", task="Run", required_checks=("done",)) for index in range(3)
         ),
         variants=(
             Variant(name="left", harness=harness),
@@ -203,9 +198,7 @@ def test_static_shards_keep_pairs_together_and_merge_exactly(tmp_path: Path) -> 
     for report in reports:
         owners: dict[tuple[str, int], set[str]] = {}
         for result in report.results:
-            owners.setdefault((result.key.case, result.key.sample), set()).add(
-                result.key.variant
-            )
+            owners.setdefault((result.key.case, result.key.sample), set()).add(result.key.variant)
         assert all(variants == {"left", "right"} for variants in owners.values())
     merged = merge_reports(campaign, roots)
     assert len(merged.results) == 12

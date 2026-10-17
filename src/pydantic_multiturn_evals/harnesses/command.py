@@ -74,7 +74,7 @@ class CommandTarget:
             start_new_session=True,
             limit=self.limits.response_bytes + 1,
         )
-        session = _CommandSession(process, self.limits)
+        session = _CommandSession(process, self.limits, trial.directory / "target.stderr.txt")
         try:
             await session.request(
                 {
@@ -99,9 +99,11 @@ class _CommandSession:
         self,
         process: asyncio.subprocess.Process,
         limits: CommandLimits,
+        stderr_path: Path,
     ) -> None:
         self._process = process
         self._limits = limits
+        self._stderr_path = stderr_path
         self._turn = 0
         self._failed = False
         self._stderr = bytearray()
@@ -163,7 +165,7 @@ class _CommandSession:
         if stdin is None or stdout is None:
             raise RuntimeError("target process has no pipe")
         if self._process.returncode is not None:
-            raise RuntimeError(self._exit_message())
+            raise RuntimeError(await self._exit_message())
         stdin.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
         await stdin.drain()
         try:
@@ -173,7 +175,7 @@ class _CommandSession:
                 f"target response exceeds {self._limits.response_bytes} bytes"
             ) from error
         if not line:
-            raise RuntimeError(self._exit_message())
+            raise RuntimeError(await self._exit_message())
         if len(line) > self._limits.response_bytes:
             raise RuntimeError(f"target response exceeds {self._limits.response_bytes} bytes")
         try:
@@ -223,7 +225,17 @@ class _CommandSession:
             if remaining > 0:
                 self._stderr.extend(chunk[:remaining])
 
-    def _exit_message(self) -> str:
-        detail = self._stderr.decode(errors="replace").strip()
-        suffix = f": {detail}" if detail else ""
-        return f"target exited with code {self._process.returncode}{suffix}"
+    async def _exit_message(self) -> str:
+        # Stderr can echo prompts or credentials, and failure messages are persisted and exported,
+        # so it goes to a trial artifact and the message carries only its size.
+        try:
+            async with asyncio.timeout(self._limits.shutdown_seconds):
+                await self._process.wait()
+                await asyncio.shield(self._stderr_task)
+        except TimeoutError:
+            pass
+        message = f"target exited with code {self._process.returncode}"
+        if not self._stderr:
+            return message
+        self._stderr_path.write_bytes(bytes(self._stderr))
+        return f"{message}; {len(self._stderr)} bytes of stderr in {self._stderr_path.name}"

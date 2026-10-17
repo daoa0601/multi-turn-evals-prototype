@@ -61,17 +61,13 @@ async def collect_process_output(
         terminate_process_group(process)
         return output, error_output
     except asyncio.CancelledError:
-        await asyncio.shield(
-            stop_process_group(process, signal.SIGINT, cancel_grace_seconds)
-        )
+        await asyncio.shield(stop_process_group(process, signal.SIGINT, cancel_grace_seconds))
         for task in (stdout_task, stderr_task):
             task.cancel()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         raise
     except BaseException:
-        await asyncio.shield(
-            stop_process_group(process, signal.SIGTERM, cancel_grace_seconds)
-        )
+        await asyncio.shield(stop_process_group(process, signal.SIGTERM, cancel_grace_seconds))
         for task in (stdout_task, stderr_task):
             task.cancel()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)

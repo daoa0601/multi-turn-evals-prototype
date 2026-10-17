@@ -218,11 +218,7 @@ class _CapacityPool:
         if invalid:
             name, slots = next(iter(invalid.items()))
             raise ValueError(f"capacity {name!r} must be positive, got {slots}")
-        claimed = {
-            claim.name
-            for variant in campaign.variants
-            for claim in variant.resources
-        }
+        claimed = {claim.name for variant in campaign.variants for claim in variant.resources}
         missing = claimed - capacities.keys()
         if missing:
             raise ValueError(f"missing capacities for resources: {', '.join(sorted(missing))}")
