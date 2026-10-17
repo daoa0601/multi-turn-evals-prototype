@@ -53,8 +53,12 @@ async def collect_process_output(
     stdout_task = asyncio.create_task(_read_at_most(stdout, stdout_bytes, "stdout"))
     stderr_task = asyncio.create_task(_read_at_most(stderr, stderr_bytes, "stderr"))
     try:
-        stdin.write(request)
-        await stdin.drain()
+        try:
+            stdin.write(request)
+            await stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # A command may exit without reading its request; its output and exit code still decide.
+            pass
         stdin.close()
         output, error_output = await asyncio.gather(stdout_task, stderr_task)
         await process.wait()
@@ -77,7 +81,8 @@ async def collect_process_output(
 def terminate_process_group(process: asyncio.subprocess.Process) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # macOS reports EPERM for a group whose only member is an unreaped zombie.
         return
 
 
@@ -92,7 +97,7 @@ async def stop_process_group(
         raise ValueError("process cancellation grace must not be negative")
     try:
         os.killpg(process.pid, first_signal)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         await process.wait()
         return
     try:
