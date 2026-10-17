@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from pydantic_multiturn_evals import (
+    Campaign,
+    Case,
     Completed,
     ComponentDefinition,
     Evidence,
@@ -16,7 +21,11 @@ from pydantic_multiturn_evals import (
     NativeCheck,
     TrialKey,
     TrialResult,
+    Variant,
+    run,
 )
+from pydantic_multiturn_evals.harnesses import FunctionHarness
+from pydantic_multiturn_evals.model import TraceRecorder, Trial
 from pydantic_multiturn_evals.tracing import (
     LangfuseExporter,
     LocalTrace,
@@ -47,6 +56,90 @@ def test_langfuse_exporter_runs_the_installed_sdk_in_an_isolated_process(
 
     asyncio.run(exporter.export(key, trace.events, result, "1" * 32))
     assert "pk-lf-local-test" not in exporter.component.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "rejected_path, rejected_status",
+    [
+        ("/api/public/otel/v1/traces", 401),
+        ("/api/public/ingestion", 401),
+        ("/api/public/ingestion", 207),
+    ],
+)
+def test_rejected_langfuse_delivery_is_retried_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rejected_path: str, rejected_status: int
+) -> None:
+    reject = True
+    requests: list[str] = []
+
+    class Collector(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(self.path)
+            status = rejected_status if reject and self.path == rejected_path else 200
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                b'{"errors": [{"status": 400, "message": "rejected score"}]}'
+                if status == 207
+                else b"{}"
+            )
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    async def direct(_case: Case, _trial: Trial, _trace: TraceRecorder) -> Evidence:
+        return Evidence(checks=(NativeCheck(name="done", passed=True, reason="completed"),))
+
+    campaign = Campaign(
+        name="langfuse-retry",
+        revision="1",
+        cases=(Case(name="case", task="Run", required_checks=("done",)),),
+        variants=(
+            Variant(
+                name="direct",
+                harness=FunctionHarness(
+                    component=ComponentDefinition(kind="direct", version="1"), function=direct
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-local-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-local-test")
+    monkeypatch.setenv("LANGFUSE_TRACING_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_SAMPLE_RATE", "1")
+    monkeypatch.setenv("LANGFUSE_FLUSH_INTERVAL", "0.01")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    with ThreadingHTTPServer(("127.0.0.1", 0), Collector) as server:
+        monkeypatch.setenv("LANGFUSE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        thread.start()
+        try:
+            exporter = LangfuseExporter.from_environment()
+            report = asyncio.run(run(campaign, directory=tmp_path, exporters=(exporter,)))
+
+            assert report.exit_code == 0
+            assert rejected_path in requests
+            error_path = next(tmp_path.glob("trials/**/trace-export-errors.json"))
+            assert "Langfuse" in error_path.read_text(encoding="utf-8")
+            state_path = next(tmp_path.glob("trials/**/trace-exports.json"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            assert state["succeeded"] == []
+            requests.clear()
+            reject = False
+
+            resumed = asyncio.run(run(campaign, directory=tmp_path, exporters=(exporter,)))
+
+            assert resumed.executed_trials == 0
+            assert rejected_path in requests
+            retried_state = json.loads(state_path.read_text(encoding="utf-8"))
+            assert retried_state["export_id"] == state["export_id"]
+            assert len(retried_state["succeeded"]) == 1
+            assert not error_path.exists()
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 class _RecordingLangfuseClient:
@@ -124,11 +217,52 @@ def test_langfuse_renders_model_call_receipts_as_generations(
         "total": 15,
         "requests": 0,
         "tool_calls": 0,
-        "cache_write_tokens": 0,
-        "cache_read_tokens": 0,
-        "input_audio_tokens": 0,
-        "cache_audio_read_tokens": 0,
-        "output_audio_tokens": 0,
     }
     assert generation["cost_details"] == {"total": 0.004}
     assert client.flushed is True
+
+
+def test_langfuse_omits_unknown_tokens_and_retains_known_metrics(tmp_path: Path) -> None:
+    key = TrialKey(campaign="trace", revision="1", case="case", variant="direct", sample=1)
+    call = ModelCall(
+        role="target",
+        operation="reply",
+        requested=ComponentDefinition(kind="provider-model", version="1"),
+        provider="litellm",
+        interface="chat",
+        status="completed",
+        usage=ModelUsage(
+            requests=1,
+            tool_calls=1,
+            input_tokens=None,
+            output_tokens=0,
+            cache_read_tokens=None,
+            cost_usd=0.004,
+        ),
+    )
+    trace = LocalTrace(key, 1, tmp_path / "events.jsonl")
+    trace.record(ModelCallFact(call=call))
+    trace.close()
+    result = TrialResult(
+        key=key,
+        attempt=1,
+        duration_seconds=0,
+        terminal=Completed(
+            evidence=Evidence(checks=(NativeCheck(name="done", passed=True, reason="completed"),))
+        ),
+        model_calls=(call,),
+    )
+    client = _RecordingLangfuseClient()
+
+    export_with_langfuse_client(client, key, trace.events, result, "1" * 32)
+
+    generation = client.observations[1]
+    details = generation["usage_details"]
+    assert isinstance(details, dict)
+    assert "input" not in details
+    assert "total" not in details
+    assert "cache_read_tokens" not in details
+    assert details["output"] == 0
+    assert details["requests"] == 1
+    assert details["tool_calls"] == 1
+    assert generation["cost_details"] == {"total": 0.004}

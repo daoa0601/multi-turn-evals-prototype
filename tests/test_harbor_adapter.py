@@ -285,8 +285,8 @@ trial = trial / arguments[arguments.index('--job-name') + 1] / 'case__trial'
     )
     assert [call.role for call in result.model_calls] == ["target", "target"]
     usage = [call.usage for call in result.model_calls if call.usage is not None]
-    assert sum(item.input_tokens for item in usage) == 300
-    assert sum(item.output_tokens for item in usage) == 18
+    assert sum(item.input_tokens for item in usage if item.input_tokens is not None) == 300
+    assert sum(item.output_tokens for item in usage if item.output_tokens is not None) == 18
     assert sum(item.cost_usd or 0 for item in usage) == pytest.approx(0.03)
     assert all(call.duration_seconds is None for call in result.model_calls)
     assert all(call.provider == "harbor" for call in result.model_calls)

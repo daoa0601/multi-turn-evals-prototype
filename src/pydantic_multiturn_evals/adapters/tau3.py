@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -55,23 +56,27 @@ class Tau3Participant(StrictModel):
 
     @model_validator(mode="after")
     def reject_inline_credentials(self) -> Self:
-        secret_names = {
-            "api_key",
-            "authorization",
-            "password",
-            "secret",
-            "token",
-        }
-        invalid = [
-            name
-            for name in self.arguments
-            if name.casefold() in secret_names or name.casefold().endswith("_api_key")
-        ]
+        invalid = list(_credential_paths(self.arguments))
         if invalid:
             raise ValueError(
                 f"Tau3 model credentials must come from the environment: {', '.join(invalid)}"
             )
         return self
+
+
+def _credential_paths(value: JsonValue, path: str = "") -> Iterator[str]:
+    if isinstance(value, dict):
+        for name, item in value.items():
+            child_path = f"{path}.{name}" if path else name
+            normalized = name.casefold()
+            if normalized in {"api_key", "authorization", "password", "secret", "token"} or (
+                normalized.endswith("_api_key")
+            ):
+                yield child_path
+            yield from _credential_paths(item, child_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _credential_paths(item, f"{path}[{index}]")
 
 
 class _WorkerReply(StrictModel):
@@ -534,12 +539,12 @@ def _model_usage(message: _TauMessage) -> ModelUsage:
     )
 
 
-def _non_negative_int(values: dict[str, JsonValue], *names: str) -> int:
+def _non_negative_int(values: dict[str, JsonValue], *names: str) -> int | None:
     for name in names:
         value = values.get(name)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
-    return 0
+    return None
 
 
 def _json_or_text(value: str) -> JsonValue:

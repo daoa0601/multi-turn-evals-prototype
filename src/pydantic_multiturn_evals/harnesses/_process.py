@@ -52,6 +52,7 @@ async def collect_process_output(
         raise RuntimeError("command has no process pipe")
     stdout_task = asyncio.create_task(_read_at_most(stdout, stdout_bytes, "stdout"))
     stderr_task = asyncio.create_task(_read_at_most(stderr, stderr_bytes, "stderr"))
+    exit_task = asyncio.create_task(_finish_process_group(process))
     try:
         try:
             stdin.write(request)
@@ -60,22 +61,32 @@ async def collect_process_output(
             # A command may exit without reading its request; its output and exit code still decide.
             pass
         stdin.close()
-        output, error_output = await asyncio.gather(stdout_task, stderr_task)
-        await process.wait()
-        terminate_process_group(process)
+        output, error_output, _ = await asyncio.gather(stdout_task, stderr_task, exit_task)
         return output, error_output
-    except asyncio.CancelledError:
-        await asyncio.shield(stop_process_group(process, signal.SIGINT, cancel_grace_seconds))
-        for task in (stdout_task, stderr_task):
-            task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    except BaseException as error:
+        exit_task.cancel()
+        first_signal = (
+            signal.SIGINT if isinstance(error, asyncio.CancelledError) else signal.SIGTERM
+        )
+        try:
+            await asyncio.shield(stop_process_group(process, first_signal, cancel_grace_seconds))
+        finally:
+            for task in (stdout_task, stderr_task):
+                task.cancel()
+            await asyncio.gather(stdout_task, stderr_task, exit_task, return_exceptions=True)
         raise
-    except BaseException:
-        await asyncio.shield(stop_process_group(process, signal.SIGTERM, cancel_grace_seconds))
-        for task in (stdout_task, stderr_task):
-            task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        raise
+
+
+async def _finish_process_group(process: asyncio.subprocess.Process) -> None:
+    await _wait_for_parent_exit(process)
+    terminate_process_group(process)
+    await process.wait()
+
+
+async def _wait_for_parent_exit(process: asyncio.subprocess.Process) -> None:
+    # Process.wait() can wait for pipe EOF even after the parent has exited.
+    while process.returncode is None:
+        await asyncio.sleep(0.01)
 
 
 def terminate_process_group(process: asyncio.subprocess.Process) -> None:
@@ -102,10 +113,11 @@ async def stop_process_group(
         return
     try:
         async with asyncio.timeout(grace_seconds):
-            await process.wait()
+            await _wait_for_parent_exit(process)
     except TimeoutError:
-        terminate_process_group(process)
-        await process.wait()
+        pass
+    terminate_process_group(process)
+    await process.wait()
 
 
 async def _read_at_most(

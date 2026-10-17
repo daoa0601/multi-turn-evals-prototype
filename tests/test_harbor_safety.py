@@ -353,8 +353,8 @@ agent.mkdir(parents=True)
     ]
     assert len({call.operation for call in result.model_calls}) == 2
     usage = [call.usage for call in result.model_calls if call.usage is not None]
-    assert sum(item.input_tokens for item in usage) == 140
-    assert sum(item.output_tokens for item in usage) == 16
+    assert sum(item.input_tokens for item in usage if item.input_tokens is not None) == 140
+    assert sum(item.output_tokens for item in usage if item.output_tokens is not None) == 16
     assert sum(item.cost_usd or 0 for item in usage) == pytest.approx(0.03)
     events = _events(tmp_path / "run")
     assert sum(isinstance(event.fact, MessageFact) for event in events) == 4

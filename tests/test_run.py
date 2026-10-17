@@ -10,6 +10,7 @@ import pytest
 
 from examples.offline_campaign import campaign
 from pydantic_multiturn_evals import (
+    Artifact,
     Campaign,
     Case,
     ComponentDefinition,
@@ -23,6 +24,7 @@ from pydantic_multiturn_evals import (
     NativeCheck,
     PublicOutcome,
     TraceEvent,
+    TrialBudget,
     TrialResult,
     Variant,
     read_report,
@@ -230,6 +232,61 @@ def test_evaluator_failure_is_reported_with_harness_evidence(tmp_path: Path) -> 
     assert terminal.failure.message == "evaluator broken-judge@3 failed: judge unavailable"
     assert terminal.evidence is not None
     assert terminal.evidence.public.output == {"answer": 42}
+
+
+def test_evaluator_timeout_retains_evidence_in_receipts_and_resumed_reports(tmp_path: Path) -> None:
+    async def direct(_case: Case, trial: Trial, _trace: TraceRecorder) -> Evidence:
+        (trial.directory / "answer.txt").write_text("42", encoding="utf-8")
+        return Evidence(
+            public=PublicOutcome(output={"answer": 42}),
+            checks=(NativeCheck(name="answer", passed=True, reason="answer is 42"),),
+            artifacts=(Artifact(name="answer", path="answer.txt"),),
+        )
+
+    async def hanging(_value: EvaluationInput) -> tuple[Judgment, ...]:
+        await asyncio.Event().wait()
+        return ()
+
+    campaign = Campaign(
+        name="evaluator-timeout",
+        revision="1",
+        cases=(
+            Case(
+                name="case",
+                task="Compute",
+                required_checks=("answer",),
+                criteria=(Criterion(name="correct", instruction="The answer is correct."),),
+                budget=TrialBudget(seconds=0.05),
+            ),
+        ),
+        variants=(
+            Variant(
+                name="direct",
+                harness=FunctionHarness(
+                    component=ComponentDefinition(kind="direct", version="1"), function=direct
+                ),
+                evaluators=(
+                    FunctionEvaluator(
+                        component=ComponentDefinition(kind="slow-judge", version="1"),
+                        function=hanging,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path))
+    resumed = asyncio.run(run(campaign, directory=tmp_path))
+
+    assert resumed.executed_trials == 0
+    for saved in (report, read_report(tmp_path), resumed):
+        terminal = saved.results[0].terminal
+        assert isinstance(terminal, Failed)
+        assert terminal.failure.phase == "timeout"
+        assert terminal.evidence is not None
+        assert terminal.evidence.public.output == {"answer": 42}
+        assert terminal.evidence.checks[0].passed is True
+        assert terminal.evidence.artifacts[0].path == "answer.txt"
 
 
 def test_interrupted_trial_requires_an_explicit_retry(tmp_path: Path) -> None:

@@ -110,7 +110,7 @@ class LangfuseExporter:
     def component(self) -> ComponentDefinition:
         return ComponentDefinition(
             kind="langfuse",
-            version="2",
+            version="3",
             config={"inherit_environment": list(self._inherit_environment)},
         )
 
@@ -309,7 +309,6 @@ def _usage_details(usage: ModelUsage | None) -> dict[str, int] | None:
     details = {
         "input": usage.input_tokens,
         "output": usage.output_tokens,
-        "total": usage.input_tokens + usage.output_tokens,
         "requests": usage.requests,
         "tool_calls": usage.tool_calls,
         "cache_write_tokens": usage.cache_write_tokens,
@@ -318,8 +317,10 @@ def _usage_details(usage: ModelUsage | None) -> dict[str, int] | None:
         "cache_audio_read_tokens": usage.cache_audio_read_tokens,
         "output_audio_tokens": usage.output_audio_tokens,
     }
+    if usage.input_tokens is not None and usage.output_tokens is not None:
+        details["total"] = usage.input_tokens + usage.output_tokens
     details.update({f"provider_{name}": value for name, value in usage.details.items()})
-    return details
+    return {name: value for name, value in details.items() if value is not None}
 
 
 def _cost_details(usage: ModelUsage | None) -> dict[str, float] | None:

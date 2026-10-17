@@ -17,13 +17,17 @@ from pydantic_multiturn_evals import (
     run,
 )
 from pydantic_multiturn_evals.adapters import Tau3Participant, Tau3Task, Tau3TextHarness
-from pydantic_multiturn_evals.model import TraceEvent
+from pydantic_multiturn_evals.model import JsonValue, TraceEvent
 
 
-def test_tau3_adapter_uses_the_official_reward_and_imports_the_trajectory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("has_usage", [True, False])
+def test_tau3_adapter_uses_the_official_reward_and_imports_the_trajectory(
+    tmp_path: Path, has_usage: bool
+) -> None:
     worker = tmp_path / "tau3_worker.py"
     worker.write_text(
         f"#!{sys.executable}\n"
+        + f"has_usage = {has_usage!r}\n"
         + """
 import json, pathlib, sys
 request = json.loads(sys.stdin.readline())
@@ -75,7 +79,7 @@ results.write_text(json.dumps({
                 'role': 'user',
                 'content': 'Please update my account.',
                 'cost': 0.001,
-                'usage': {'prompt_tokens': 10, 'completion_tokens': 4},
+                'usage': {'prompt_tokens': 10, 'completion_tokens': 4} if has_usage else None,
                 'generation_time_seconds': 0.1,
             },
             {
@@ -86,7 +90,7 @@ results.write_text(json.dumps({
                     'arguments': {'status': 'active'},
                 }],
                 'cost': 0.002,
-                'usage': {'prompt_tokens': 20, 'completion_tokens': 5},
+                'usage': {'prompt_tokens': 20, 'completion_tokens': 5} if has_usage else None,
                 'generation_time_seconds': 0.2,
             },
             {
@@ -98,14 +102,14 @@ results.write_text(json.dumps({
                 'role': 'assistant',
                 'content': 'The account was not updated.',
                 'cost': 0.001,
-                'usage': {'prompt_tokens': 30, 'completion_tokens': 6},
+                'usage': {'prompt_tokens': 30, 'completion_tokens': 6} if has_usage else None,
                 'generation_time_seconds': 0.3,
             },
             {
                 'role': 'user',
                 'content': '###STOP###',
                 'cost': 0.001,
-                'usage': {'prompt_tokens': 40, 'completion_tokens': 2},
+                'usage': {'prompt_tokens': 40, 'completion_tokens': 2} if has_usage else None,
                 'generation_time_seconds': 0.1,
             },
         ],
@@ -172,7 +176,23 @@ print('ordinary tau3 console output')
         "user",
     ]
     assert [call.role for call in result.model_calls] == ["actor", "target", "target", "actor"]
-    assert sum(call.usage.input_tokens for call in result.model_calls if call.usage) == 100
+    usages = [call.usage for call in result.model_calls]
+    assert all(usage is not None for usage in usages)
+    if has_usage:
+        assert (
+            sum(usage.input_tokens for usage in usages if usage and usage.input_tokens is not None)
+            == 100
+        )
+    else:
+        for usage in usages:
+            assert usage is not None
+            assert usage.input_tokens is None
+            assert usage.output_tokens is None
+            assert usage.cache_read_tokens is None
+            assert usage.requests == 1
+            assert usage.cost_usd is not None
+        assert result.model_calls[1].usage is not None
+        assert result.model_calls[1].usage.tool_calls == 1
     events = [
         TraceEvent.model_validate_json(line)
         for line in next((tmp_path / "run").glob("trials/**/events.jsonl"))
@@ -188,10 +208,30 @@ print('ordinary tau3 console output')
     )
 
 
-def test_tau3_participant_rejects_a_credential_in_persisted_arguments() -> None:
-    with pytest.raises(ValueError, match="credentials must come from the environment: api_key"):
+@pytest.mark.parametrize(
+    "arguments, name",
+    [
+        ({"api_key": "must-not-be-persisted"}, "api_key"),
+        ({"extra_headers": {"Authorization": "Bearer must-not-be-persisted"}}, "Authorization"),
+        ({"fallbacks": [{"options": {"provider_API_KEY": "must-not-be-persisted"}}]}, "API_KEY"),
+    ],
+)
+def test_tau3_participant_rejects_a_credential_in_persisted_arguments(
+    arguments: dict[str, JsonValue], name: str
+) -> None:
+    with pytest.raises(ValueError, match=f"credentials must come from the environment: .*{name}"):
         Tau3Participant(
             implementation="llm_agent",
             model="provider/model",
-            arguments={"api_key": "must-not-be-persisted"},
+            arguments=arguments,
         )
+
+
+def test_tau3_participant_accepts_nested_non_secret_arguments() -> None:
+    participant = Tau3Participant(
+        implementation="llm_agent",
+        model="provider/model",
+        arguments={"extra_headers": {"X-Request-Source": "evaluation"}, "stop": ["END"]},
+    )
+
+    assert participant.arguments["extra_headers"] == {"X-Request-Source": "evaluation"}

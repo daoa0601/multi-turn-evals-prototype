@@ -168,8 +168,7 @@ class ConversationHarness:
             raise
         finally:
             try:
-                async with asyncio.timeout(self.cleanup_timeout_seconds):
-                    await session.close()
+                await _close_session(session, self.cleanup_timeout_seconds)
             except Exception as error:
                 if primary_error is None:
                     raise HarnessError(
@@ -178,6 +177,29 @@ class ConversationHarness:
                         or f"target cleanup exceeded {self.cleanup_timeout_seconds:g} seconds",
                         evidence=finished_evidence or _partial_evidence(messages),
                     ) from error
+
+
+async def _close_session(session: TargetSession, timeout_seconds: float) -> None:
+    async def bounded_close() -> None:
+        async with asyncio.timeout(timeout_seconds):
+            await session.close()
+
+    cleanup = asyncio.create_task(bounded_close())
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError as error:
+            if cleanup.cancelled():
+                raise
+            cancellation = error
+        except Exception as error:
+            if cancellation is not None:
+                raise cancellation from error
+            raise
+    if cancellation is not None:
+        raise cancellation
 
 
 def _partial_evidence(messages: list[Message]) -> Evidence:

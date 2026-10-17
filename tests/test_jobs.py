@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -162,14 +164,15 @@ def test_command_job_stops_reading_at_the_authored_output_limit(tmp_path: Path) 
     assert terminal.failure.message == "command job stdout exceeds 1000 bytes"
 
 
-def test_successful_job_reaps_background_descendants(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inherit_pipes", [False, True])
+def test_successful_job_reaps_background_descendants(tmp_path: Path, inherit_pipes: bool) -> None:
     code = """
 import json, os, pathlib, subprocess, sys
 child = subprocess.Popen(
     [sys.executable, '-c', 'import time; time.sleep(60)'],
     stdin=subprocess.DEVNULL,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
+    stdout=None if INHERIT_PIPES else subprocess.DEVNULL,
+    stderr=None if INHERIT_PIPES else subprocess.DEVNULL,
 )
 pathlib.Path(os.environ['MTE_TRIAL_DIRECTORY'], 'child-pid').write_text(str(child.pid))
 print(json.dumps({'protocol': 1, 'evidence': {
@@ -184,8 +187,9 @@ print(json.dumps({'protocol': 1, 'evidence': {
             Variant(
                 name="command",
                 harness=OneShotCommandHarness(
-                    argv=(sys.executable, "-c", code),
+                    argv=(sys.executable, "-c", f"INHERIT_PIPES = {inherit_pipes!r}\n" + code),
                     cwd=tmp_path,
+                    timeout_seconds=0.5,
                 ),
             ),
         ),
@@ -197,6 +201,63 @@ print(json.dumps({'protocol': 1, 'evidence': {
     child_pid = int(next((tmp_path / "run").glob("trials/**/child-pid")).read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
+
+
+def test_job_timeout_kills_a_child_that_ignores_sigint_after_parent_exit(tmp_path: Path) -> None:
+    code = """
+import os, pathlib, signal, subprocess, sys, time
+workspace = pathlib.Path(os.environ['MTE_TRIAL_DIRECTORY'])
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+child = subprocess.Popen(
+    [sys.executable, '-c', '''
+import pathlib, signal, sys, time
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text('ready')
+time.sleep(60)
+''', str(workspace / 'child-ready')],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+(workspace / 'child-pid').write_text(str(child.pid))
+while not (workspace / 'child-ready').exists():
+    time.sleep(0.01)
+time.sleep(60)
+"""
+    campaign = Campaign(
+        name="stubborn-descendant",
+        revision="1",
+        cases=(Case(name="job", task="wait", required_checks=("done",)),),
+        variants=(
+            Variant(
+                name="command",
+                harness=OneShotCommandHarness(
+                    argv=(sys.executable, "-c", code), cwd=tmp_path, timeout_seconds=0.5
+                ),
+            ),
+        ),
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path / "run"))
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert "exceeded 0.5 seconds" in terminal.failure.message
+    child_pid = int(next((tmp_path / "run").glob("trials/**/child-pid")).read_text())
+    try:
+        for _ in range(100):
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"job returned while SIGINT-ignoring child {child_pid} was still running")
+    finally:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def test_changing_a_command_limit_rejects_old_receipts(tmp_path: Path) -> None:

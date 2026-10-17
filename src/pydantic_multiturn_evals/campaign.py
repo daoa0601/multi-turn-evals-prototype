@@ -333,7 +333,8 @@ async def _run_trial(
         terminal = Interrupted(reason="campaign task was cancelled")
     except TimeoutError as error:
         terminal = Failed(
-            failure=Failure(phase="timeout", message=str(error) or "trial exceeded its budget")
+            failure=Failure(phase="timeout", message=str(error) or "trial exceeded its budget"),
+            evidence=evidence,
         )
     except HarnessError as error:
         terminal = Failed(

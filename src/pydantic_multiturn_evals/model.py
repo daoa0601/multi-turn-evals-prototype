@@ -209,15 +209,17 @@ class ResourceFact(StrictModel):
 
 
 class ModelUsage(StrictModel):
+    """Reported usage; an absent token count is unknown."""
+
     requests: Annotated[int, Field(ge=0)] = 0
     tool_calls: Annotated[int, Field(ge=0)] = 0
-    input_tokens: Annotated[int, Field(ge=0)] = 0
-    cache_write_tokens: Annotated[int, Field(ge=0)] = 0
-    cache_read_tokens: Annotated[int, Field(ge=0)] = 0
-    output_tokens: Annotated[int, Field(ge=0)] = 0
-    input_audio_tokens: Annotated[int, Field(ge=0)] = 0
-    cache_audio_read_tokens: Annotated[int, Field(ge=0)] = 0
-    output_audio_tokens: Annotated[int, Field(ge=0)] = 0
+    input_tokens: Annotated[int, Field(ge=0)] | None = None
+    cache_write_tokens: Annotated[int, Field(ge=0)] | None = None
+    cache_read_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_tokens: Annotated[int, Field(ge=0)] | None = None
+    input_audio_tokens: Annotated[int, Field(ge=0)] | None = None
+    cache_audio_read_tokens: Annotated[int, Field(ge=0)] | None = None
+    output_audio_tokens: Annotated[int, Field(ge=0)] | None = None
     cost_usd: Annotated[float, Field(ge=0)] | None = None
     details: dict[str, int] = Field(default_factory=dict)
 

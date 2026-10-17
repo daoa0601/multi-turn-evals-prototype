@@ -325,14 +325,24 @@ def _verify_results(results: tuple[TrialResult, ...], campaign: Campaign) -> Non
             raise RuntimeError(f"Pydantic trial lost authored task data: {result.key}")
 
 
-def _usage_summary(calls: Sequence[ModelCall]) -> dict[str, int | float]:
+def _usage_summary(calls: Sequence[ModelCall]) -> dict[str, int | float | None]:
     usages = [call.usage for call in calls if call.usage is not None]
     costs = [usage.cost_usd for usage in usages if usage.cost_usd is not None]
+    input_tokens = [usage.input_tokens for usage in usages]
+    output_tokens = [usage.output_tokens for usage in usages]
     return {
         "requests": sum(usage.requests for usage in usages),
         "tool_calls": sum(usage.tool_calls for usage in usages),
-        "input_tokens": sum(usage.input_tokens for usage in usages),
-        "output_tokens": sum(usage.output_tokens for usage in usages),
+        "input_tokens": (
+            None
+            if None in input_tokens
+            else sum(value for value in input_tokens if value is not None)
+        ),
+        "output_tokens": (
+            None
+            if None in output_tokens
+            else sum(value for value in output_tokens if value is not None)
+        ),
         "known_cost_usd": round(sum(costs), 9),
         "calls_with_known_cost": len(costs),
     }

@@ -145,7 +145,74 @@ def test_cleanup_failure_keeps_evidence_produced_while_target_was_open(tmp_path:
     assert caught.value.evidence.checks[0].name == "state"
 
 
-@pytest.mark.parametrize("blocked_phase", ["actor", "send", "finish"])
+@pytest.mark.parametrize("cancel_campaign", [False, True])
+def test_cancellation_during_cleanup_waits_before_releasing_the_trial(
+    tmp_path: Path, cancel_campaign: bool
+) -> None:
+    async def exercise() -> None:
+        closing = asyncio.Event()
+        release = asyncio.Event()
+        starts: list[bool] = []
+
+        class SlowCloseSession(RecordingSession):
+            async def close(self) -> None:
+                closing.set()
+                await release.wait()
+                self.events.append("destroyed")
+
+        class CapacityTarget(RecordingTarget):
+            async def open(self, trial: Trial, trace: TraceRecorder) -> TargetSession:
+                starts.append("destroyed" in self.session.events)
+                return await super().open(trial, trace)
+
+        target = CapacityTarget(session=SlowCloseSession())
+        campaign = Campaign(
+            name="cleanup-capacity",
+            revision="1",
+            cases=(
+                Case(
+                    name="case",
+                    task="Help me",
+                    required_checks=("state",),
+                    budget=TrialBudget(seconds=10 if cancel_campaign else 0.05),
+                ),
+            ),
+            variants=(
+                Variant(
+                    name="only",
+                    harness=ConversationHarness(target=target, actor=AdaptiveActor()),
+                    resources=(ResourceClaim(name="target"),),
+                ),
+            ),
+            samples=2,
+        )
+        task = asyncio.create_task(
+            run(campaign, directory=tmp_path, workers=2, capacities={"target": 1})
+        )
+        await asyncio.wait_for(closing.wait(), timeout=1)
+        if cancel_campaign:
+            task.cancel()
+        try:
+            done, _ = await asyncio.wait({task}, timeout=0.1)
+            assert not done, "campaign returned before target destruction finished"
+            assert starts == [False], "target capacity was released before destruction finished"
+        finally:
+            release.set()
+            if cancel_campaign:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                report = await task
+                assert isinstance(report.results[0].terminal, Failed)
+                assert report.results[0].terminal.failure.phase == "timeout"
+        assert target.session.events[-1] == "destroyed"
+        if not cancel_campaign:
+            assert starts == [False, True]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("blocked_phase", ["actor", "send", "finish", "close"])
 def test_deadline_propagates_when_target_cleanup_hangs(tmp_path: Path, blocked_phase: str) -> None:
     async def exercise() -> None:
         release = asyncio.Event()

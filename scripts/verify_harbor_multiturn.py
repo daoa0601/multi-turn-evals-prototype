@@ -572,7 +572,8 @@ def _assert_public_evidence(
             f"{directory / 'result.json'}"
         )
     if not atif_calls or any(
-        call.usage is None or call.usage.input_tokens <= 0 for call in atif_calls
+        call.usage is None or call.usage.input_tokens is None or call.usage.input_tokens <= 0
+        for call in atif_calls
     ):
         raise RuntimeError(
             f"trial {identity} has no ATIF-derived model usage receipt with tokens; "
