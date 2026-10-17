@@ -325,6 +325,7 @@ class HarborHarness:
         starting = failure()
         self._require_task(task, result, starting)
         self._require_agent(result, starting)
+        self._require_model(result, starting)
         if result.exception_info is not None:
             messages = self._import_optional_trajectory(agent_dir, trial.directory, trace, chain)
             raise HarnessError(
@@ -437,6 +438,27 @@ class HarborHarness:
             raise HarnessError(
                 "protocol",
                 f"Harbor returned agent {result.agent_info.name!r}, expected {self.agent!r}",
+                evidence=evidence,
+            )
+
+    def _require_model(self, result: _HarborResult, evidence: Evidence) -> None:
+        if self.model is None:
+            return
+        model = result.agent_info.model_info
+        if model is None:
+            raise HarnessError(
+                "protocol",
+                f"Harbor result has no model_info, expected model {self.model!r}",
+                evidence=evidence,
+            )
+        names = {model.name}
+        if model.provider is not None:
+            names.add(f"{model.provider}/{model.name}")
+        if self.model not in names:
+            raise HarnessError(
+                "protocol",
+                f"Harbor returned model {model.name!r} from provider {model.provider!r}, "
+                f"expected {self.model!r}",
                 evidence=evidence,
             )
 

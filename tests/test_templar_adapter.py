@@ -7,14 +7,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from pydantic_multiturn_evals import Campaign, Case, Completed, Failed, TrialBudget, Variant, run
 from pydantic_multiturn_evals.adapters import TemplarArtifact, TemplarHarness, TemplarTask
+from pydantic_multiturn_evals.model import LifecycleFact, TraceEvent
 
 
 class _TemplarService(ThreadingHTTPServer):
     requests: list[tuple[str, str, Any]]
     inspections: int
     never_finish: bool
+    events: list[dict[str, Any]]
+    publish_on_accept: bool
+    status_override: tuple[int, Any] | None
+    submission_override: Any
+    cancel_status: int
     ready: threading.Event
 
     def service_actions(self) -> None:
@@ -28,6 +36,9 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/api/artifacts/source-snapshot":
             self._send(201, {"artifact_id": "source_sha256_123"})
         elif self.path == "/api/workflows/source_security_audit/runs":
+            if self._service.submission_override is not None:
+                self._send(202, self._service.submission_override)
+                return
             self._send(
                 202,
                 {
@@ -41,7 +52,7 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif self.path == "/api/runs/run-1/cancel":
             self._send(
-                200,
+                self._service.cancel_status,
                 {"runId": "run-1", "status": "interrupted", "lastSequence": 1},
             )
         else:
@@ -50,13 +61,15 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         self._service.requests.append(("GET", self.path, None))
         if self.path.startswith("/api/runs/run-1/events"):
-            events = (
-                [{"sequence": 1, "at": "now", "type": "candidate.completed"}]
-                if "after=0" in self.path
-                else []
-            )
-            self._send(200, events)
+            cursor = int(self.path.split("after=")[1])
+            events = self._service.events
+            if self._service.publish_on_accept and self._service.inspections < 2:
+                events = events[:1]
+            self._send(200, [event for event in events if event["sequence"] > cursor][:1])
         elif self.path == "/api/runs/run-1":
+            if self._service.status_override is not None:
+                self._send(*self._service.status_override)
+                return
             self._service.inspections += 1
             accepted = self._service.inspections > 1 and not self._service.never_finish
             self._send(
@@ -64,7 +77,7 @@ class _Handler(BaseHTTPRequestHandler):
                 {
                     "runId": "run-1",
                     "status": "accepted" if accepted else "running",
-                    "lastSequence": 1,
+                    "lastSequence": len(self._service.events),
                     "applied": True if accepted else None,
                 },
             )
@@ -75,7 +88,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "run": {
                         "runId": "run-1",
                         "status": "accepted",
-                        "lastSequence": 1,
+                        "lastSequence": len(self._service.events),
                         "applied": True,
                     },
                     "result": {"finding": "bounded"},
@@ -155,6 +168,113 @@ def test_templar_adapter_cancels_a_remote_run_when_the_case_times_out(tmp_path: 
     assert state["phase"] == "cancelled"
 
 
+@pytest.mark.parametrize("publish_on_accept", [False, True], ids=["paginated", "late-events"])
+def test_templar_adapter_drains_events_before_accepting(
+    tmp_path: Path, publish_on_accept: bool
+) -> None:
+    service, thread = _service(publish_on_accept=publish_on_accept)
+    service.events.extend(
+        [
+            {"sequence": 2, "type": "evaluation.completed"},
+            {"sequence": 3, "type": "result.applied"},
+            {"sequence": 4, "type": "run.accepted"},
+        ]
+    )
+    try:
+        snapshot = tmp_path / "source.json"
+        snapshot.write_text("{}", encoding="utf-8")
+        report = asyncio.run(run(_campaign(service, snapshot), directory=tmp_path / "run"))
+    finally:
+        service.shutdown()
+        thread.join()
+
+    assert isinstance(report.results[0].terminal, Completed)
+    event_file = next((tmp_path / "run").glob("trials/**/templar-events.jsonl"))
+    events = [json.loads(line) for line in event_file.read_text().splitlines()]
+    assert [event["type"] for event in events] == [event["type"] for event in service.events]
+    trace_file = next((tmp_path / "run").glob("trials/**/events.jsonl"))
+    facts = [
+        TraceEvent.model_validate_json(line).fact for line in trace_file.read_text().splitlines()
+    ]
+    assert [
+        fact.detail
+        for fact in facts
+        if isinstance(fact, LifecycleFact) and fact.phase == "templar-event"
+    ] == [event["type"] for event in service.events]
+
+
+@pytest.mark.parametrize("cancel_status", [200, 502], ids=["cancelled", "cancel-failed"])
+@pytest.mark.parametrize(
+    ("status", "response", "phase", "message"),
+    [
+        (503, {"error": "service unavailable"}, "execute", "returned 503"),
+        (200, {"status": "running"}, "protocol", "invalid Templar response"),
+    ],
+    ids=["http-error", "malformed-response"],
+)
+def test_templar_adapter_cancels_after_submission_errors_without_masking_them(
+    tmp_path: Path, cancel_status: int, status: int, response: Any, phase: str, message: str
+) -> None:
+    service, thread = _service()
+    service.status_override = (status, response)
+    service.cancel_status = cancel_status
+    try:
+        snapshot = tmp_path / "source.json"
+        snapshot.write_text("{}", encoding="utf-8")
+        report = asyncio.run(run(_campaign(service, snapshot), directory=tmp_path / "run"))
+    finally:
+        service.shutdown()
+        thread.join()
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert terminal.failure.phase == phase
+    assert message in terminal.failure.message
+    assert ("POST", "/api/runs/run-1/cancel", None) in service.requests
+    state = json.loads(next((tmp_path / "run").glob("trials/**/templar-state.json")).read_text())
+    assert state["phase"] == ("cancelled" if cancel_status == 200 else "cancellation-unconfirmed")
+
+
+def test_templar_cancels_a_known_run_even_when_the_submission_view_is_malformed(
+    tmp_path: Path,
+) -> None:
+    service, thread = _service()
+    service.submission_override = {"run_id": "run-1", "run": {"status": "running"}}
+    try:
+        snapshot = tmp_path / "source.json"
+        snapshot.write_text("{}", encoding="utf-8")
+        report = asyncio.run(run(_campaign(service, snapshot), directory=tmp_path / "run"))
+    finally:
+        service.shutdown()
+        thread.join()
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert terminal.failure.phase == "protocol"
+    assert ("POST", "/api/runs/run-1/cancel", None) in service.requests
+
+
+def test_templar_event_drain_obeys_the_case_deadline(tmp_path: Path) -> None:
+    service, thread = _service()
+    service.status_override = (
+        200,
+        {"runId": "run-1", "status": "accepted", "lastSequence": 2, "applied": True},
+    )
+    try:
+        snapshot = tmp_path / "source.json"
+        snapshot.write_text("{}", encoding="utf-8")
+        campaign = _campaign(service, snapshot, budget=TrialBudget(seconds=0.05))
+        report = asyncio.run(run(campaign, directory=tmp_path / "run"))
+    finally:
+        service.shutdown()
+        thread.join()
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert terminal.failure.phase == "timeout"
+    assert ("POST", "/api/runs/run-1/cancel", None) in service.requests
+
+
 def _campaign(
     service: _TemplarService,
     snapshot: Path,
@@ -198,11 +318,18 @@ def _campaign(
     )
 
 
-def _service(*, never_finish: bool = False) -> tuple[_TemplarService, threading.Thread]:
+def _service(
+    *, never_finish: bool = False, publish_on_accept: bool = False
+) -> tuple[_TemplarService, threading.Thread]:
     service = _TemplarService(("127.0.0.1", 0), _Handler)
     service.requests = []
     service.inspections = 0
     service.never_finish = never_finish
+    service.events = [{"sequence": 1, "at": "now", "type": "candidate.completed"}]
+    service.publish_on_accept = publish_on_accept
+    service.status_override = None
+    service.submission_override = None
+    service.cancel_status = 200
     service.ready = threading.Event()
     thread = threading.Thread(
         target=service.serve_forever,

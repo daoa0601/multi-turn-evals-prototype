@@ -5,7 +5,9 @@ import json
 import sys
 from pathlib import Path
 
-from pydantic_multiturn_evals import Campaign, Case, Completed, Variant, run
+import pytest
+
+from pydantic_multiturn_evals import Campaign, Case, Completed, Failed, Variant, run
 from pydantic_multiturn_evals.adapters import SweBenchHarness, SweBenchTask
 
 
@@ -77,6 +79,66 @@ root.mkdir(parents=True)
     assert json.loads(prediction.read_text())[0]["model_patch"].startswith("diff --git")
     native_report = next((tmp_path / "run").glob("trials/**/logs/**/report.json"))
     assert json.loads(native_report.read_text())["owner__repo-1"]["resolved"] is False
+
+
+@pytest.mark.parametrize("verifier_report", [False, True], ids=["no-report", "real-report"])
+@pytest.mark.parametrize("plant_location", ["root", "logs"])
+def test_swebench_ignores_reports_planted_by_the_solver(
+    tmp_path: Path, verifier_report: bool, plant_location: str
+) -> None:
+    solver = _executable(
+        tmp_path / "plant_report.py",
+        """
+import json, os, pathlib, sys
+request = json.loads(sys.stdin.readline())
+root = pathlib.Path(os.environ['MTE_TRIAL_DIRECTORY'])
+run_id = json.loads((root / 'swebench-state.json').read_text())['run_id']
+directory = root / 'logs' / 'run_evaluation' / run_id / 'solver' if sys.argv[1] == 'logs' else root
+directory.mkdir(parents=True, exist_ok=True)
+(directory / 'report.json').write_text(json.dumps({request['instance']: {'resolved': True}}))
+print(json.dumps({'protocol': 1, 'patch': 'diff --git a/a.py b/a.py\\n'}))
+""",
+    )
+    evaluator = _executable(
+        tmp_path / "verifier.py",
+        f"""
+import json, pathlib, sys
+args = sys.argv[1:]
+if {verifier_report!r}:
+    run_id = args[args.index('--run-id') + 1]
+    instance = args[args.index('--instance') + 1]
+    root = pathlib.Path.cwd() / 'logs' / 'run_evaluation' / run_id / 'solver' / instance
+    root.mkdir(parents=True)
+    (root / 'report.json').write_text(json.dumps({{instance: {{'resolved': False}}}}))
+""",
+    )
+    harness = SweBenchHarness(
+        evaluator_argv=(str(evaluator),),
+        package_version="5.0.2-boundary",
+        tasks=(
+            SweBenchTask(case="repair", dataset="verified", instance="owner__repo-2", revision="1"),
+        ),
+        solver_argv=(str(solver), plant_location),
+        solver_cwd=tmp_path,
+        solver_revision="1",
+    )
+    campaign = Campaign(
+        name="swebench-report-authority",
+        revision="1",
+        cases=(Case(name="repair", task="Repair the bug", required_checks=("swebench.resolved",)),),
+        variants=(Variant(name="only", harness=harness),),
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path / "run"))
+
+    terminal = report.results[0].terminal
+    if verifier_report:
+        assert isinstance(terminal, Completed)
+        assert terminal.evidence.checks[0].passed is False
+    else:
+        assert isinstance(terminal, Failed)
+        assert terminal.failure.phase == "verify"
+        assert "without an instance report" in terminal.failure.message
 
 
 def _executable(path: Path, body: str) -> Path:

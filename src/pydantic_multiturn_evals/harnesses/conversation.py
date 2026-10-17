@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol
 
@@ -81,6 +82,11 @@ class Target(Protocol):
 class ConversationHarness:
     target: Target
     actor: Actor
+    cleanup_timeout_seconds: float = 30
+
+    def __post_init__(self) -> None:
+        if self.cleanup_timeout_seconds <= 0:
+            raise ValueError("conversation cleanup timeout must be positive")
 
     @property
     def component(self) -> ComponentDefinition:
@@ -90,6 +96,7 @@ class ConversationHarness:
             config={
                 "target": self.target.component.model_dump(mode="json"),
                 "actor": self.actor.component.model_dump(mode="json"),
+                "cleanup_timeout_seconds": self.cleanup_timeout_seconds,
             },
         )
 
@@ -161,12 +168,14 @@ class ConversationHarness:
             raise
         finally:
             try:
-                await session.close()
+                async with asyncio.timeout(self.cleanup_timeout_seconds):
+                    await session.close()
             except Exception as error:
                 if primary_error is None:
                     raise HarnessError(
                         "cleanup",
-                        str(error),
+                        str(error)
+                        or f"target cleanup exceeded {self.cleanup_timeout_seconds:g} seconds",
                         evidence=finished_evidence or _partial_evidence(messages),
                     ) from error
 

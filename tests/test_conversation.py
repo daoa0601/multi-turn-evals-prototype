@@ -7,13 +7,19 @@ from pathlib import Path
 import pytest
 
 from pydantic_multiturn_evals import (
+    Campaign,
     Case,
     ComponentDefinition,
+    Failed,
     Message,
     NativeCheck,
+    ResourceClaim,
     TraceRecorder,
     Trial,
+    TrialBudget,
     TrialKey,
+    Variant,
+    run,
 )
 from pydantic_multiturn_evals.evaluation import HarnessError
 from pydantic_multiturn_evals.harnesses import (
@@ -137,6 +143,77 @@ def test_cleanup_failure_keeps_evidence_produced_while_target_was_open(tmp_path:
     assert caught.value.phase == "cleanup"
     assert caught.value.evidence is not None
     assert caught.value.evidence.checks[0].name == "state"
+
+
+@pytest.mark.parametrize("blocked_phase", ["actor", "send", "finish"])
+def test_deadline_propagates_when_target_cleanup_hangs(tmp_path: Path, blocked_phase: str) -> None:
+    async def exercise() -> None:
+        release = asyncio.Event()
+
+        class HangingSession(RecordingSession):
+            async def send(self, message: Message) -> tuple[Message, ...]:
+                if blocked_phase == "send":
+                    await asyncio.Event().wait()
+                return await super().send(message)
+
+            async def finish(self, messages: tuple[Message, ...]) -> TargetCompletion:
+                if blocked_phase == "finish":
+                    await asyncio.Event().wait()
+                return await super().finish(messages)
+
+            async def close(self) -> None:
+                self.events.append("close")
+                await release.wait()
+
+        class HangingActor(AdaptiveActor):
+            async def next_turn(
+                self,
+                case: Case,
+                messages: tuple[Message, ...],
+                turn: int,
+                trace: TraceRecorder,
+            ) -> Continue | Accept:
+                if blocked_phase == "actor":
+                    await asyncio.Event().wait()
+                return await super().next_turn(case, messages, turn, trace)
+
+        target = RecordingTarget(session=HangingSession())
+        harness = ConversationHarness(
+            target=target, actor=HangingActor(), cleanup_timeout_seconds=0.01
+        )
+        campaign = Campaign(
+            name="cleanup-deadline",
+            revision="1",
+            cases=(
+                Case(
+                    name="case",
+                    task="Help me",
+                    required_checks=("state",),
+                    budget=TrialBudget(seconds=0.01),
+                ),
+            ),
+            variants=(
+                Variant(name="only", harness=harness, resources=(ResourceClaim(name="target"),)),
+            ),
+            samples=2,
+        )
+        task = asyncio.create_task(
+            run(campaign, directory=tmp_path / "run", workers=2, capacities={"target": 1})
+        )
+        done, _ = await asyncio.wait({task}, timeout=1)
+        release.set()
+        report = await task
+
+        assert done, "hung target cleanup prevented the case deadline from propagating"
+        assert len(report.results) == 2, "cleanup held the resource permit for the next trial"
+        for result in report.results:
+            assert isinstance(result.terminal, Failed)
+            assert result.terminal.failure.phase == "timeout"
+        assert target.session.events[-1] == "close"
+        resumed = await run(campaign, directory=tmp_path / "run", capacities={"target": 1})
+        assert resumed.executed_trials == 0, "completed campaign did not release its lock"
+
+    asyncio.run(exercise())
 
 
 def _key() -> TrialKey:

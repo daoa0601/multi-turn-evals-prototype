@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -166,9 +167,12 @@ class SweBenchHarness:
                     ),
                     artifacts=tuple(artifacts),
                 )
-        report = await self._verify(task, trial, run_id, prediction_path)
+        verifier_directory = Path(
+            tempfile.mkdtemp(prefix="swebench-verifier-", dir=trial.directory)
+        )
+        report = await self._verify(task, verifier_directory, run_id, prediction_path)
         report_path, resolved = report
-        artifacts.extend(_verifier_artifacts(trial.directory, report_path))
+        artifacts.extend(_verifier_artifacts(trial.directory, verifier_directory, report_path))
         _write_json(
             state_path,
             {
@@ -233,11 +237,11 @@ class SweBenchHarness:
     async def _verify(
         self,
         task: SweBenchTask,
-        trial: Trial,
+        directory: Path,
         run_id: str,
         prediction: Path | None,
     ) -> tuple[Path, bool]:
-        summary = trial.directory / "swebench-summary"
+        summary = directory / "swebench-summary"
         command = [
             *self.evaluator_argv,
             "eval",
@@ -258,17 +262,19 @@ class SweBenchHarness:
         command.extend(("--gold",) if prediction is None else ("--predictions", str(prediction)))
         stdout, stderr, returncode = await _command(
             tuple(command),
-            cwd=trial.directory,
-            environment=command_environment(self.evaluator_environment, trial.directory),
+            cwd=directory,
+            environment=command_environment(self.evaluator_environment, directory),
             request=b"",
             timeout_seconds=self.verifier_timeout_seconds + 60,
             output_bytes=self.output_bytes,
             stderr_bytes=self.stderr_bytes,
             label="SWE-bench verifier",
         )
-        (trial.directory / "swebench.stdout.txt").write_bytes(stdout)
-        (trial.directory / "swebench.stderr.txt").write_bytes(stderr)
-        report = _find_instance_report(trial.directory, task.instance)
+        (directory / "swebench.stdout.txt").write_bytes(stdout)
+        (directory / "swebench.stderr.txt").write_bytes(stderr)
+        report = _find_instance_report(
+            directory / "logs" / "run_evaluation" / run_id, task.instance
+        )
         if report is None:
             detail = stderr.decode(errors="replace").strip()
             raise HarnessError(
@@ -351,15 +357,15 @@ def _run_id(trial: Trial) -> str:
     return value
 
 
-def _verifier_artifacts(root: Path, report: Path) -> tuple[Artifact, ...]:
+def _verifier_artifacts(root: Path, directory: Path, report: Path) -> tuple[Artifact, ...]:
     paths = [
         report,
-        root / "swebench.stdout.txt",
-        root / "swebench.stderr.txt",
+        directory / "swebench.stdout.txt",
+        directory / "swebench.stderr.txt",
     ]
-    paths.extend(root.rglob("run_instance.log"))
-    paths.extend(root.rglob("test_output.txt"))
-    paths.extend(root.glob("swebench-summary/*.json"))
+    paths.extend(directory.rglob("run_instance.log"))
+    paths.extend(directory.rglob("test_output.txt"))
+    paths.extend(directory.glob("swebench-summary/*.json"))
     unique: list[Path] = []
     for path in paths:
         if path.is_file() and path not in unique:

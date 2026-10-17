@@ -164,58 +164,64 @@ class TemplarHarness:
                     state["artifact_id"] = uploaded.artifact_id
                     state["phase"] = "artifact-staged"
                     _write_json(state_path, state)
-                submitted = _Submitted.model_validate(
-                    await self._json(
-                        client,
-                        "POST",
-                        f"/api/workflows/{task.workflow}/runs",
-                        input_value,
-                    )
+                submission = await self._json(
+                    client,
+                    "POST",
+                    f"/api/workflows/{task.workflow}/runs",
+                    input_value,
                 )
+                # Cleanup still needs the run id if the accompanying view is malformed.
+                identifier = submission.get("run_id") if isinstance(submission, dict) else None
+                if isinstance(identifier, str):
+                    run_id = identifier
+                submitted = _Submitted.model_validate(submission)
                 run_id = submitted.run_id
                 state["run_id"] = run_id
                 state["phase"] = "submitted"
                 _write_json(state_path, state)
                 final = await self._wait(client, run_id, trial, trace, state, state_path)
+                final_path = trial.directory / "templar-result.json"
+                report_path = trial.directory / "templar-report.md"
+                events_path = trial.directory / "templar-events.jsonl"
+                _write_json(final_path, final.model_dump(mode="json"))
+                report_path.write_text(final.report, encoding="utf-8")
+                if not events_path.exists():
+                    events_path.touch()
+                state["phase"] = "finished"
+                _write_json(state_path, state)
+                return Evidence(
+                    public=PublicOutcome(output=final.result),
+                    checks=(
+                        NativeCheck(
+                            name=self.check,
+                            passed=final.evaluation.passed,
+                            reason="Templar accepted result evaluation passed"
+                            if final.evaluation.passed
+                            else "Templar accepted result evaluation failed",
+                        ),
+                    ),
+                    artifacts=(
+                        Artifact(name="templar-result", path=final_path.name),
+                        Artifact(
+                            name="templar-report", path=report_path.name, media_type="text/markdown"
+                        ),
+                        Artifact(
+                            name="templar-events",
+                            path=events_path.name,
+                            media_type="application/x-ndjson",
+                        ),
+                    ),
+                )
             except asyncio.CancelledError:
                 if run_id is not None:
                     await asyncio.shield(self._cancel(client, run_id, state, state_path))
                 raise
-            except HarnessError:
-                raise
             except Exception as error:
+                if run_id is not None:
+                    await asyncio.shield(self._cancel(client, run_id, state, state_path))
+                if isinstance(error, HarnessError):
+                    raise
                 raise HarnessError("protocol", f"invalid Templar response: {error}") from error
-
-        final_path = trial.directory / "templar-result.json"
-        report_path = trial.directory / "templar-report.md"
-        events_path = trial.directory / "templar-events.jsonl"
-        _write_json(final_path, final.model_dump(mode="json"))
-        report_path.write_text(final.report, encoding="utf-8")
-        if not events_path.exists():
-            events_path.touch()
-        state["phase"] = "finished"
-        _write_json(state_path, state)
-        return Evidence(
-            public=PublicOutcome(output=final.result),
-            checks=(
-                NativeCheck(
-                    name=self.check,
-                    passed=final.evaluation.passed,
-                    reason="Templar accepted result evaluation passed"
-                    if final.evaluation.passed
-                    else "Templar accepted result evaluation failed",
-                ),
-            ),
-            artifacts=(
-                Artifact(name="templar-result", path=final_path.name),
-                Artifact(name="templar-report", path=report_path.name, media_type="text/markdown"),
-                Artifact(
-                    name="templar-events",
-                    path=events_path.name,
-                    media_type="application/x-ndjson",
-                ),
-            ),
-        )
 
     async def _wait(
         self,
@@ -252,9 +258,10 @@ class TemplarHarness:
             if view.status == "accepted":
                 if view.applied is not True:
                     raise HarnessError("verify", "Templar accepted run was not applied")
-                return _TemplarResult.model_validate(
-                    await self._json(client, "GET", f"/api/runs/{run_id}/result")
-                )
+                if cursor >= view.last_sequence:
+                    return _TemplarResult.model_validate(
+                        await self._json(client, "GET", f"/api/runs/{run_id}/result")
+                    )
             if view.status in {"failed", "interrupted", "stopped", "budget_exhausted"}:
                 raise HarnessError("execute", f"Templar run ended with status {view.status!r}")
             await asyncio.sleep(self.poll_seconds)
@@ -266,16 +273,22 @@ class TemplarHarness:
         state: dict[str, JsonValue],
         state_path: Path,
     ) -> None:
+        state["run_id"] = run_id
         try:
-            value = _RunView.model_validate(
-                await self._json(client, "POST", f"/api/runs/{run_id}/cancel", None)
-            )
+            async with asyncio.timeout(self.request_timeout_seconds):
+                value = _RunView.model_validate(
+                    await self._json(client, "POST", f"/api/runs/{run_id}/cancel", None)
+                )
             state["phase"] = "cancelled"
             state["status"] = value.status
         except Exception as error:
             state["phase"] = "cancellation-unconfirmed"
             state["cancel_error"] = str(error) or repr(error)
-        _write_json(state_path, state)
+        try:
+            _write_json(state_path, state)
+        except OSError:
+            # Recording cleanup must not hide the failure that triggered it.
+            pass
 
     async def _json(
         self,

@@ -839,6 +839,69 @@ trial.mkdir(parents=True)
     assert terminal.evidence.checks[0].passed is True
 
 
+@pytest.mark.parametrize(
+    ("requested", "model_info", "matches"),
+    [
+        ("provider/requested", None, False),
+        ("provider/requested", {"name": "different", "provider": "provider"}, False),
+        ("provider/requested", {"name": "requested", "provider": "other"}, False),
+        ("provider/requested", {"name": "requested", "provider": "provider"}, True),
+        ("provider/requested", {"name": "provider/requested"}, True),
+        ("requested", {"name": "requested", "provider": "provider"}, True),
+    ],
+    ids=["absent", "wrong-name", "wrong-provider", "split-name", "full-name", "bare-name"],
+)
+def test_harbor_requires_the_requested_model_in_the_saved_result(
+    tmp_path: Path, requested: str, model_info: dict[str, str] | None, matches: bool
+) -> None:
+    fake_cli = _cli(
+        tmp_path,
+        "harbor_model_cli.py",
+        f"""
+import json, pathlib, sys
+arguments = sys.argv[1:]
+assert arguments[arguments.index('--model') + 1] == {requested!r}
+trial = pathlib.Path(arguments[arguments.index('--jobs-dir') + 1])
+trial = trial / arguments[arguments.index('--job-name') + 1] / 'case__trial'
+trial.mkdir(parents=True)
+(trial / 'result.json').write_text(json.dumps({{
+  'task_name': 'case',
+  'trial_name': 'case__trial',
+  'agent_info': {{'name': 'oracle', 'version': '1', 'model_info': {model_info!r}}},
+  'verifier_result': {{'rewards': {{'reward': 1}}}},
+}}))
+""",
+    )
+    campaign = Campaign(
+        name="harbor-model-identity",
+        revision="1",
+        cases=(Case(name="case", task="Run", required_checks=("harbor.verified",)),),
+        variants=(
+            Variant(
+                name="only",
+                harness=HarborHarness(
+                    executable=fake_cli,
+                    harbor_version="test-boundary",
+                    tasks=(HarborLocalTask(case="case", path=tmp_path, revision="1"),),
+                    model=requested,
+                ),
+            ),
+        ),
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path / "run"))
+
+    terminal = report.results[0].terminal
+    if matches:
+        assert isinstance(terminal, Completed)
+        assert terminal.evidence.checks[0].passed is True
+    else:
+        assert isinstance(terminal, Failed)
+        assert terminal.failure.phase == "protocol"
+        assert "model" in terminal.failure.message
+        assert requested in terminal.failure.message
+
+
 def test_harbor_harness_rejects_inline_credentials_and_glob_task_bindings() -> None:
     with pytest.raises(ValueError, match="must come from the environment"):
         HarborHarness(

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import JsonValue
 
@@ -62,16 +64,22 @@ class _Commands(Protocol):
     ) -> _CommandResult: ...
 
 
+class _FileInfo(Protocol):
+    size: int
+
+
 class _Files(Protocol):
     async def write(self, path: str, data: str, *, request_timeout: float) -> object: ...
+
+    async def get_info(self, path: str, *, request_timeout: float) -> _FileInfo: ...
 
     async def read(
         self,
         path: str,
-        format: str = "text",
+        format: Literal["stream"],
         *,
         request_timeout: float,
-    ) -> str | bytearray: ...
+    ) -> AbstractAsyncContextManager[AsyncIterator[bytes]]: ...
 
 
 class _Sandbox(Protocol):
@@ -203,7 +211,7 @@ class _AgentEnvSession:
             },
         )
         reply = _TurnReply.model_validate_json(
-            await self._read_text(
+            await self._read_bytes(
                 self.target.response_path,
                 self.target.response_bytes,
                 self.target.turn_timeout_seconds,
@@ -240,7 +248,7 @@ class _AgentEnvSession:
             },
         )
         reply = _VerifierReply.model_validate_json(
-            await self._read_text(
+            await self._read_bytes(
                 self.target.verify_response_path,
                 self.target.response_bytes,
                 self.target.verify_timeout_seconds,
@@ -313,17 +321,21 @@ class _AgentEnvSession:
         if stdout:
             self.trace.record(LogFact(level="debug", message=result.stdout[:1000]))
 
-    async def _read_text(self, path: str, limit: int, timeout_seconds: float) -> str:
+    async def _read_bytes(self, path: str, limit: int, timeout_seconds: float) -> bytes:
+        message = f"AgentENV file {path!r} exceeds {limit} bytes"
         async with asyncio.timeout(timeout_seconds):
-            value = await self.sandbox.files.read(
-                path,
-                "bytes",
-                request_timeout=timeout_seconds,
-            )
-        raw = bytes(value) if isinstance(value, bytearray) else value.encode()
-        if len(raw) > limit:
-            raise RuntimeError(f"AgentENV file {path!r} exceeds {limit} bytes")
-        return raw.decode()
+            info = await self.sandbox.files.get_info(path, request_timeout=timeout_seconds)
+            if info.size > limit:
+                raise RuntimeError(message)
+            raw = bytearray()
+            async with await self.sandbox.files.read(
+                path, "stream", request_timeout=timeout_seconds
+            ) as stream:
+                async for chunk in stream:
+                    if len(raw) + len(chunk) > limit:
+                        raise RuntimeError(message)
+                    raw.extend(chunk)
+        return bytes(raw)
 
     async def _download(
         self,
@@ -334,16 +346,12 @@ class _AgentEnvSession:
         total = 0
         artifacts: list[Artifact] = []
         for value in requested:
-            async with asyncio.timeout(self.target.verify_timeout_seconds):
-                content = await self.sandbox.files.read(
-                    value.path,
-                    "bytes",
-                    request_timeout=self.target.verify_timeout_seconds,
-                )
-            raw = bytes(content) if isinstance(content, bytearray) else content.encode()
+            raw = await self._read_bytes(
+                value.path,
+                self.target.artifact_bytes - total,
+                self.target.verify_timeout_seconds,
+            )
             total += len(raw)
-            if total > self.target.artifact_bytes:
-                raise RuntimeError(f"AgentENV artifacts exceed {self.target.artifact_bytes} bytes")
             destination = root / value.name
             destination.write_bytes(raw)
             artifacts.append(

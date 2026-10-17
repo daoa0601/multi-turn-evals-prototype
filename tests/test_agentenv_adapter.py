@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -30,9 +32,41 @@ class _Result:
     stderr: str = ""
 
 
+@dataclass
+class _FileInfo:
+    size: int
+
+
+class _FileStream:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.downloaded = 0
+        self.closed = False
+
+    async def __aenter__(self) -> _FileStream:
+        return self
+
+    async def __aexit__(self, *error: object) -> None:
+        self.closed = True
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for offset in range(0, len(self.content), 64):
+            chunk = self.content[offset : offset + 64]
+            self.downloaded += len(chunk)
+            yield chunk
+
+
 class _Files:
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {"/work/proof.txt": b"real state"}
+        self.padding: dict[str, int] = {}
+        self.reported_sizes: dict[str, int] = {}
+        self.reads: list[str] = []
+        self.streams: dict[str, _FileStream] = {}
+
+    async def get_info(self, path: str, *, request_timeout: float) -> _FileInfo:
+        size = len(self.values[path]) + self.padding.get(path, 0)
+        return _FileInfo(self.reported_sizes.get(path, size))
 
     async def write(self, path: str, data: str, *, request_timeout: float) -> object:
         self.values[path] = data.encode()
@@ -41,12 +75,15 @@ class _Files:
     async def read(
         self,
         path: str,
-        format: str = "text",
+        format: Literal["stream"],
         *,
         request_timeout: float,
-    ) -> str | bytearray:
-        value = self.values[path]
-        return bytearray(value) if format == "bytes" else value.decode()
+    ) -> _FileStream:
+        self.reads.append(path)
+        value = self.values[path] + b" " * self.padding.get(path, 0)
+        stream = _FileStream(value)
+        self.streams[path] = stream
+        return stream
 
 
 class _Commands:
@@ -54,6 +91,7 @@ class _Commands:
         self.files = files
         self.order = order
         self.block = block
+        self.artifacts = [{"name": "proof", "path": "/work/proof.txt"}]
 
     async def run(
         self,
@@ -83,7 +121,7 @@ class _Commands:
                     "checks": [
                         {"name": "sandbox-state", "passed": True, "reason": "state changed"}
                     ],
-                    "artifacts": [{"name": "proof", "path": "/work/proof.txt"}],
+                    "artifacts": self.artifacts,
                 }
             ).encode()
             self.order.append("verify")
@@ -166,9 +204,68 @@ def test_agentenv_target_destroys_the_sandbox_when_a_turn_times_out(
     assert state["phase"] == "destroyed"
 
 
+@pytest.mark.parametrize(
+    "remote_path", ["/tmp/mte/response.json", "/tmp/mte/verify-response.json", "/work/proof.txt"]
+)
+@pytest.mark.parametrize("size_is_current", [True, False], ids=["known-size", "growing-file"])
+def test_agentenv_rejects_oversized_files_before_downloading_the_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_path: str, size_is_current: bool
+) -> None:
+    sandbox = _Sandbox()
+    sandbox.files.padding[remote_path] = 8192
+    if not size_is_current:
+        sandbox.files.reported_sizes[remote_path] = 1
+
+    async def create(_template: str, _ttl: int, _environment: dict[str, str]) -> _Sandbox:
+        return sandbox
+
+    monkeypatch.setattr(agentenv_module, "_create_sandbox", create)
+
+    report = asyncio.run(
+        run(_campaign(response_bytes=512, artifact_bytes=512), directory=tmp_path / "run")
+    )
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert remote_path in terminal.failure.message
+    assert "512 bytes" in terminal.failure.message
+    assert sandbox.order[-1] == "destroy"
+    if size_is_current:
+        assert remote_path not in sandbox.files.reads, (
+            "oversized file was downloaded despite its size"
+        )
+    else:
+        assert remote_path in sandbox.files.streams, "file was buffered instead of streamed"
+        stream = sandbox.files.streams[remote_path]
+        assert stream.downloaded <= 512 + 64
+        assert stream.closed, "oversized download left its connection open"
+
+
+def test_agentenv_checks_remaining_artifact_budget_before_the_next_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sandbox = _Sandbox()
+    sandbox.files.values["/work/extra.txt"] = b"more proof"
+    sandbox.commands.artifacts.append({"name": "extra", "path": "/work/extra.txt"})
+
+    async def create(_template: str, _ttl: int, _environment: dict[str, str]) -> _Sandbox:
+        return sandbox
+
+    monkeypatch.setattr(agentenv_module, "_create_sandbox", create)
+
+    report = asyncio.run(run(_campaign(artifact_bytes=15), directory=tmp_path / "run"))
+
+    assert isinstance(report.results[0].terminal, Failed)
+    assert "/work/proof.txt" in sandbox.files.reads
+    assert "/work/extra.txt" not in sandbox.files.reads, "download exceeded the remaining budget"
+    assert sandbox.order[-1] == "destroy"
+
+
 def _campaign(
     *,
     budget: TrialBudget | None = None,
+    response_bytes: int = 4_000_000,
+    artifact_bytes: int = 64_000_000,
 ) -> Campaign:
     target = AgentEnvTarget(
         template="adapter-contract",
@@ -176,6 +273,8 @@ def _campaign(
         verifier_command="verify",
         turn_timeout_seconds=1,
         verify_timeout_seconds=1,
+        response_bytes=response_bytes,
+        artifact_bytes=artifact_bytes,
     )
     return Campaign(
         name="agentenv-boundary",
