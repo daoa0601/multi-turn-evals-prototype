@@ -1,0 +1,379 @@
+"""One-instance adapter for the official SWE-bench evaluator."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+from pydantic import JsonValue
+
+from pydantic_multiturn_evals.evaluation import HarnessError
+from pydantic_multiturn_evals.harnesses._process import (
+    ProcessOutputLimitError,
+    collect_process_output,
+    command_environment,
+)
+from pydantic_multiturn_evals.model import (
+    Artifact,
+    Case,
+    ComponentDefinition,
+    Evidence,
+    Name,
+    NativeCheck,
+    PublicOutcome,
+    StrictModel,
+    Text,
+    TraceRecorder,
+    Trial,
+)
+
+
+class SweBenchTask(StrictModel):
+    case: Name
+    dataset: Text
+    split: Text = "test"
+    instance: Text
+    revision: Text
+
+
+class _SolverReply(StrictModel):
+    protocol: int
+    patch: str
+    output: JsonValue = None
+    trajectory: JsonValue = None
+
+
+@dataclass(frozen=True, slots=True)
+class SweBenchHarness:
+    """Produce one patch, then grade it in a fresh official evaluator environment."""
+
+    evaluator_argv: tuple[str, ...]
+    package_version: str
+    tasks: tuple[SweBenchTask, ...]
+    solver_argv: tuple[str, ...] | None = None
+    solver_cwd: Path = Path(".")
+    solver_name: str = "solver"
+    solver_revision: str | None = None
+    check: str = "swebench.resolved"
+    solver_timeout_seconds: float = 900
+    verifier_timeout_seconds: float = 1800
+    output_bytes: int = 8_000_000
+    stderr_bytes: int = 2_000_000
+    solver_environment: tuple[str, ...] = ()
+    evaluator_environment: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        cases = [task.case for task in self.tasks]
+        if not self.evaluator_argv:
+            raise ValueError("SWE-bench evaluator command must not be empty")
+        if not self.tasks:
+            raise ValueError("SweBenchHarness needs at least one task binding")
+        if len(cases) != len(set(cases)):
+            raise ValueError("SWE-bench task case bindings must be unique")
+        if self.solver_argv == ():
+            raise ValueError("SWE-bench solver command must not be empty")
+        if self.solver_argv is not None and not self.solver_revision:
+            raise ValueError("SWE-bench external solver needs a semantic revision")
+        if self.solver_timeout_seconds <= 0 or self.verifier_timeout_seconds <= 0:
+            raise ValueError("SWE-bench timeouts must be positive")
+        if self.output_bytes < 1 or self.stderr_bytes < 1:
+            raise ValueError("SWE-bench output limits must be positive")
+
+    @property
+    def component(self) -> ComponentDefinition:
+        return ComponentDefinition(
+            kind="swebench",
+            version="1",
+            config={
+                "package_version": self.package_version,
+                "tasks": [task.model_dump(mode="json") for task in self.tasks],
+                "solver_name": self.solver_name,
+                "solver_revision": self.solver_revision,
+                "check": self.check,
+                "solver_timeout_seconds": self.solver_timeout_seconds,
+                "verifier_timeout_seconds": self.verifier_timeout_seconds,
+                "output_bytes": self.output_bytes,
+                "stderr_bytes": self.stderr_bytes,
+                "solver_environment": list(self.solver_environment),
+                "evaluator_environment": list(self.evaluator_environment),
+            },
+        )
+
+    async def run(self, case: Case, trial: Trial, trace: TraceRecorder) -> Evidence:
+        del trace
+        task = self._task(case.name)
+        run_id = _run_id(trial)
+        state_path = trial.directory / "swebench-state.json"
+        _write_json(
+            state_path,
+            {
+                "protocol": 1,
+                "phase": "solver" if self.solver_argv is not None else "gold",
+                "instance": task.instance,
+                "run_id": run_id,
+            },
+        )
+        artifacts: list[Artifact] = []
+        public: JsonValue = None
+        prediction_path: Path | None = None
+        if self.solver_argv is not None:
+            solver = await self._solve(case, task, trial)
+            public = solver.output
+            patch_path = trial.directory / "model.patch"
+            solver_path = trial.directory / "solver-result.json"
+            patch_path.write_text(solver.patch, encoding="utf-8")
+            _write_json(solver_path, solver.model_dump(mode="json"))
+            prediction_path = trial.directory / "prediction.json"
+            _write_json(
+                prediction_path,
+                [
+                    {
+                        "instance_id": task.instance,
+                        "model_patch": solver.patch,
+                        "model_name_or_path": self.solver_name,
+                    }
+                ],
+            )
+            artifacts.extend(
+                (
+                    Artifact(name="swebench-patch", path=patch_path.name, media_type="text/x-diff"),
+                    Artifact(name="swebench-solver", path=solver_path.name),
+                    Artifact(name="swebench-prediction", path=prediction_path.name),
+                )
+            )
+            if not solver.patch.strip():
+                _write_json(
+                    state_path,
+                    {
+                        "protocol": 1,
+                        "phase": "finished",
+                        "instance": task.instance,
+                        "run_id": run_id,
+                        "resolved": False,
+                        "verifier": "not-run-empty-patch",
+                    },
+                )
+                return Evidence(
+                    public=PublicOutcome(output=public),
+                    checks=(
+                        NativeCheck(
+                            name=self.check,
+                            passed=False,
+                            reason="solver returned no patch",
+                        ),
+                    ),
+                    artifacts=tuple(artifacts),
+                )
+        report = await self._verify(task, trial, run_id, prediction_path)
+        report_path, resolved = report
+        artifacts.extend(_verifier_artifacts(trial.directory, report_path))
+        _write_json(
+            state_path,
+            {
+                "protocol": 1,
+                "phase": "finished",
+                "instance": task.instance,
+                "run_id": run_id,
+                "resolved": resolved,
+                "report": str(report_path.relative_to(trial.directory)),
+            },
+        )
+        return Evidence(
+            public=PublicOutcome(output=public),
+            checks=(
+                NativeCheck(
+                    name=self.check,
+                    passed=resolved,
+                    reason=f"official SWE-bench report resolved={str(resolved).lower()}",
+                ),
+            ),
+            artifacts=tuple(artifacts),
+        )
+
+    async def _solve(self, case: Case, task: SweBenchTask, trial: Trial) -> _SolverReply:
+        assert self.solver_argv is not None
+        request = {
+            "protocol": 1,
+            "task": case.task,
+            "instance": task.instance,
+            "trial": {
+                "key": trial.key.model_dump(mode="json"),
+                "attempt": trial.attempt,
+                "seed": trial.seed,
+            },
+        }
+        stdout, stderr, returncode = await _command(
+            self.solver_argv,
+            cwd=self.solver_cwd,
+            environment=command_environment(self.solver_environment, trial.directory),
+            request=(json.dumps(request) + "\n").encode(),
+            timeout_seconds=self.solver_timeout_seconds,
+            output_bytes=self.output_bytes,
+            stderr_bytes=self.stderr_bytes,
+            label="SWE-bench solver",
+        )
+        (trial.directory / "solver.stderr.txt").write_bytes(stderr)
+        if returncode != 0:
+            detail = stderr.decode(errors="replace").strip()
+            raise HarnessError(
+                "execute",
+                f"SWE-bench solver exited with code {returncode}"
+                + (f": {detail}" if detail else ""),
+            )
+        try:
+            reply = _SolverReply.model_validate_json(stdout)
+        except Exception as error:
+            raise HarnessError("protocol", f"invalid SWE-bench solver result: {error}") from error
+        if reply.protocol != 1:
+            raise HarnessError("protocol", "SWE-bench solver must return protocol 1")
+        return reply
+
+    async def _verify(
+        self,
+        task: SweBenchTask,
+        trial: Trial,
+        run_id: str,
+        prediction: Path | None,
+    ) -> tuple[Path, bool]:
+        summary = trial.directory / "swebench-summary"
+        command = [
+            *self.evaluator_argv,
+            "eval",
+            task.dataset,
+            "--run-id",
+            run_id,
+            "--instance",
+            task.instance,
+            "--split",
+            task.split,
+            "--workers",
+            "1",
+            "--timeout",
+            str(int(self.verifier_timeout_seconds)),
+            "--report-dir",
+            str(summary),
+        ]
+        command.extend(("--gold",) if prediction is None else ("--predictions", str(prediction)))
+        stdout, stderr, returncode = await _command(
+            tuple(command),
+            cwd=trial.directory,
+            environment=command_environment(self.evaluator_environment, trial.directory),
+            request=b"",
+            timeout_seconds=self.verifier_timeout_seconds + 60,
+            output_bytes=self.output_bytes,
+            stderr_bytes=self.stderr_bytes,
+            label="SWE-bench verifier",
+        )
+        (trial.directory / "swebench.stdout.txt").write_bytes(stdout)
+        (trial.directory / "swebench.stderr.txt").write_bytes(stderr)
+        report = _find_instance_report(trial.directory, task.instance)
+        if report is None:
+            detail = stderr.decode(errors="replace").strip()
+            raise HarnessError(
+                "verify",
+                f"SWE-bench verifier exited with code {returncode} without an instance report"
+                + (f": {detail}" if detail else ""),
+            )
+        try:
+            value = json.loads(report.read_text(encoding="utf-8"))[task.instance]["resolved"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise HarnessError("protocol", f"invalid SWE-bench report {report}") from error
+        if not isinstance(value, bool):
+            raise HarnessError("protocol", f"SWE-bench report {report} has no boolean resolved")
+        return report, value
+
+    def _task(self, case: str) -> SweBenchTask:
+        for task in self.tasks:
+            if task.case == case:
+                return task
+        raise HarnessError("prepare", f"no SWE-bench task is bound to case {case!r}")
+
+
+async def _command(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    request: bytes,
+    timeout_seconds: float,
+    output_bytes: int,
+    stderr_bytes: int,
+    label: str,
+) -> tuple[bytes, bytes, int]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            env=environment,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except Exception as error:
+        raise HarnessError("start", f"could not start {label}: {error}") from error
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            stdout, stderr = await collect_process_output(
+                process,
+                request,
+                stdout_bytes=output_bytes,
+                stderr_bytes=stderr_bytes,
+            )
+    except TimeoutError as error:
+        raise HarnessError("execute", f"{label} exceeded {timeout_seconds:g} seconds") from error
+    except ProcessOutputLimitError as error:
+        raise HarnessError("protocol", f"{label} {error}") from error
+    return stdout, stderr, process.returncode or 0
+
+
+def _find_instance_report(root: Path, instance: str) -> Path | None:
+    found: list[Path] = []
+    for path in root.rglob("report.json"):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict) and isinstance(value.get(instance), dict):
+            found.append(path)
+    if len(found) > 1:
+        raise HarnessError("protocol", "SWE-bench wrote multiple instance reports")
+    return found[0] if found else None
+
+
+def _run_id(trial: Trial) -> str:
+    key = trial.key
+    value = (
+        f"{key.campaign}-{key.revision}-{key.case}-{key.variant}"
+        f"-s{key.sample}-a{trial.attempt}"
+    )
+    if len(value) > 120:
+        raise HarnessError("prepare", "SWE-bench trial identity exceeds 120 characters")
+    return value
+
+
+def _verifier_artifacts(root: Path, report: Path) -> tuple[Artifact, ...]:
+    paths = [
+        report,
+        root / "swebench.stdout.txt",
+        root / "swebench.stderr.txt",
+    ]
+    paths.extend(root.rglob("run_instance.log"))
+    paths.extend(root.rglob("test_output.txt"))
+    paths.extend(root.glob("swebench-summary/*.json"))
+    unique: list[Path] = []
+    for path in paths:
+        if path.is_file() and path not in unique:
+            unique.append(path)
+    return tuple(
+        Artifact(name=f"swebench-{index:02d}-{path.name}", path=str(path.relative_to(root)))
+        for index, path in enumerate(unique, start=1)
+    )
+
+
+def _write_json(path: Path, value: JsonValue) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)

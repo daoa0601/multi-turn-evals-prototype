@@ -1,22 +1,48 @@
-.PHONY: sync check test validate compat live
+.PHONY: install install-tau3 sync format lint typecheck test verify verify-pydantic-scale verify-harbor verify-harbor-multiturn verify-harbor-pack verify-swebench verify-tau3 build check
+
+install:
+	uv sync --all-extras
+
+install-tau3:
+	uv run python -m scripts.install_tau3
 
 sync:
 	uv sync --all-extras
 
-check:
-	uv run ruff format --check .
+format:
+	uv run ruff format .
+
+lint:
 	uv run ruff check .
+
+typecheck:
 	uv run basedpyright
-	uv run pytest --cov=pydantic_multiturn_evals --cov-report=term-missing
 
 test:
-	uv run pytest -v
+	uv run pytest
 
-validate:
-	uv run multiturn-evals validate scenarios/support.yaml --target targets/support.yaml
+verify:
+	uv run python -m scripts.verify_offline
 
-compat:
-	uv run python scripts/compat_smoke.py offline
+verify-pydantic-scale:
+	uv run python -m scripts.run_pydantic_scale
 
-live:
-	uv run multiturn-evals compare scenarios/support.yaml --baseline targets/support.yaml --candidate targets/support-candidate.yaml --out outputs/support-ab
+verify-harbor:
+	uv run python -m scripts.verify_harbor
+
+verify-harbor-multiturn:
+	uv run python -m scripts.verify_harbor_multiturn
+
+verify-harbor-pack:
+	uv run python -m scripts.run_harbor_benchmark_pack
+
+verify-swebench:
+	uv run python -m scripts.verify_swebench
+
+verify-tau3:
+	uv run python -m scripts.verify_tau3
+
+build:
+	uv build
+
+check: lint typecheck test verify build
