@@ -1,254 +1,126 @@
-"""Command-line entry point for validation and live evaluations."""
+"""Command line entry point for Python-authored campaigns."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
-import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic_multiturn_evals.comparison import compare_suite
-from pydantic_multiturn_evals.evaluation import evaluate_suite
-from pydantic_multiturn_evals.experiment import compile_experiment
-from pydantic_multiturn_evals.experiment_runner import (
-    ExperimentSummary,
-    execute_experiment,
-    experiment_lock,
-    load_saved_experiment,
-    preflight_experiment,
-    save_new_experiment,
-)
-from pydantic_multiturn_evals.harbor_runner import compare_harbor_suite, load_harbor_arm
-from pydantic_multiturn_evals.observability import NO_TRACE, TraceRuntime, enable_langfuse
-from pydantic_multiturn_evals.spec import load_suite, load_target
-from pydantic_multiturn_evals.targets import build_target
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="multiturn-evals")
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    validate = commands.add_parser("validate", help="validate suite and target YAML")
-    validate.add_argument("suite", type=Path)
-    validate.add_argument("--target", type=Path)
-
-    plan = commands.add_parser("plan", help="compile an experiment into a frozen run plan")
-    plan.add_argument("experiment", type=Path)
-    plan.add_argument("--out", type=Path, required=True)
-
-    experiment_run = commands.add_parser(
-        "experiment-run", help="execute a previously compiled experiment"
-    )
-    experiment_run.add_argument("directory", type=Path)
-
-    resume = commands.add_parser(
-        "resume", help="continue pending work from a previously compiled experiment"
-    )
-    resume.add_argument("directory", type=Path)
-
-    run = commands.add_parser("run", help="run and judge an adaptive scenario suite")
-    run.add_argument("suite", type=Path)
-    run.add_argument("--target", type=Path, required=True)
-    run.add_argument("--out", type=Path, required=True)
-    run.add_argument("--max-concurrency", type=int, default=1)
-    run.add_argument("--repeat", type=int, default=1)
-    run.add_argument("--no-progress", action="store_true")
-    run.add_argument("--langfuse", action="store_true")
-
-    compare = commands.add_parser("compare", help="run baseline and candidate target configs")
-    compare.add_argument("suite", type=Path)
-    compare.add_argument("--baseline", type=Path, required=True)
-    compare.add_argument("--candidate", type=Path, required=True)
-    compare.add_argument("--out", type=Path, required=True)
-    compare.add_argument("--max-concurrency", type=int, default=1)
-    compare.add_argument("--repeat", type=int, default=1)
-    compare.add_argument("--no-progress", action="store_true")
-    compare.add_argument("--langfuse", action="store_true")
-
-    harbor_compare = commands.add_parser(
-        "harbor-compare", help="run baseline and candidate as separate Harbor jobs"
-    )
-    harbor_compare.add_argument("suite", type=Path)
-    harbor_compare.add_argument("--baseline", type=Path, required=True)
-    harbor_compare.add_argument("--candidate", type=Path, required=True)
-    harbor_compare.add_argument("--out", type=Path, required=True)
-    harbor_compare.add_argument("--max-concurrency", type=int, default=1)
-    harbor_compare.add_argument("--repeat", type=int, default=1)
-    harbor_compare.add_argument("--no-progress", action="store_true")
-    harbor_compare.add_argument("--langfuse", action="store_true")
-    return parser
+from pydantic_multiturn_evals.campaign import read_report, run
+from pydantic_multiturn_evals.model import ArtifactLimits, Campaign, Shard
+from pydantic_multiturn_evals.shards import merge_reports
+from pydantic_multiturn_evals.tracing import LangfuseExporter
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    try:
-        if args.command == "validate":
-            suite = load_suite(args.suite)
-            if args.target is not None:
-                loaded_target = load_target(args.target)
-                if loaded_target.spec.kind == "command":
-                    build_target(loaded_target)
-            print(f"valid suite {suite.name!r} with {len(suite.scenarios)} scenario(s)")
-            return 0
-        if args.command == "run":
-            return _run(args)
-        if args.command == "compare":
-            return _compare(args)
-        if args.command == "harbor-compare":
-            return _harbor_compare(args)
-        if args.command == "plan":
-            return _plan_experiment(args)
-        return _run_experiment(args)
-    except (OSError, RuntimeError, ValueError) as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 2
-
-
-def _run(args: argparse.Namespace) -> int:
-    if args.max_concurrency < 1:
-        raise ValueError("--max-concurrency must be positive")
-    if args.repeat < 1:
-        raise ValueError("--repeat must be positive")
-    suite = load_suite(args.suite)
-    target = build_target(load_target(args.target))
-    trace_runtime = _trace_runtime(args.langfuse)
-    try:
-        result = asyncio.run(
-            evaluate_suite(
-                suite,
-                target=target,
-                max_concurrency=args.max_concurrency,
-                repeat=args.repeat,
-                progress=not args.no_progress,
-                trace=trace_runtime,
-            )
-        )
-    finally:
-        trace_runtime.shutdown()
-    result.report.print(include_reasons=True)
-    result.write_artifacts(args.out)
-    print(f"wrote evaluation artifacts to {args.out}")
-    return 0 if result.gate.passed else 1
-
-
-def _compare(args: argparse.Namespace) -> int:
-    if args.max_concurrency < 1:
-        raise ValueError("--max-concurrency must be positive")
-    if args.repeat < 1:
-        raise ValueError("--repeat must be positive")
-    suite = load_suite(args.suite)
-    baseline = load_target(args.baseline)
-    candidate = load_target(args.candidate)
-    trace_runtime = _trace_runtime(args.langfuse)
-    try:
-        result = asyncio.run(
-            compare_suite(
-                suite,
-                baseline=baseline,
-                candidate=candidate,
-                max_concurrency=args.max_concurrency,
-                repeat=args.repeat,
-                progress=not args.no_progress,
-                trace=trace_runtime,
-            )
-        )
-        result.write_artifacts(args.out)
-    finally:
-        trace_runtime.shutdown()
-    print(result.summary().model_dump_json(indent=2))
-    print(f"wrote comparison artifacts to {args.out}")
-    return 0 if result.passed else 1
-
-
-def _trace_runtime(enabled: bool) -> TraceRuntime:
-    return enable_langfuse() if enabled else NO_TRACE
-
-
-def _plan_experiment(args: argparse.Namespace) -> int:
-    plan = compile_experiment(args.experiment)
-    output = args.out.resolve()
-    with experiment_lock(output):
-        save_new_experiment(plan, output)
-    print(plan.reservation.model_dump_json(indent=2))
-    print(f"wrote frozen experiment plan to {output}")
-    return 0
-
-
-def _run_experiment(args: argparse.Namespace) -> int:
-    output = args.directory.resolve()
-    with experiment_lock(output):
-        plan = load_saved_experiment(output)
-        preflight_experiment(plan)
-        summary = asyncio.run(execute_experiment(plan, output))
-    print(json.dumps(_experiment_console_summary(summary), indent=2))
-    return 0 if summary.passed else 1
-
-
-def _experiment_console_summary(summary: ExperimentSummary) -> dict[str, object]:
-    return {
-        "experiment": summary.experiment,
-        "passed": summary.passed,
-        "planned": summary.planned,
-        "completed": summary.completed,
-        "quality_passed": summary.quality_passed,
-        "task_failed": summary.task_failed,
-        "execution_failed": summary.execution_failed,
-        "interrupted": summary.interrupted,
-        "pending": summary.pending,
-        "arms": [arm.model_dump(mode="json") for arm in summary.arms],
-        "comparisons": [
-            {
-                "name": comparison.name,
-                "complete": comparison.complete,
-                "mean_score_delta_candidate_minus_baseline": (
-                    comparison.mean_score_delta_candidate_minus_baseline
+    parser = _parser()
+    arguments = parser.parse_args(argv)
+    if arguments.command == "run":
+        campaign = _load_campaign(arguments.campaign)
+        exporters = (LangfuseExporter.from_environment(),) if arguments.langfuse else ()
+        report = asyncio.run(
+            run(
+                campaign,
+                directory=arguments.directory,
+                workers=arguments.workers,
+                retry_interrupted=arguments.retry_interrupted,
+                exporters=exporters,
+                export_timeout_seconds=arguments.trace_export_timeout,
+                capacities=_capacities(arguments.capacity),
+                artifact_limits=ArtifactLimits(
+                    files=arguments.artifact_files,
+                    file_bytes=arguments.artifact_file_bytes,
+                    total_bytes=arguments.artifact_total_bytes,
                 ),
-                "pair_count": len(comparison.pairs),
-            }
-            for comparison in summary.comparisons
-        ],
-    }
-
-
-def _harbor_compare(args: argparse.Namespace) -> int:
-    if args.max_concurrency < 1:
-        raise ValueError("--max-concurrency must be positive")
-    if args.repeat < 1:
-        raise ValueError("--repeat must be positive")
-    suite = load_suite(args.suite)
-    baseline = load_harbor_arm(args.baseline)
-    candidate = load_harbor_arm(args.candidate)
-    output = args.out.resolve()
-    work_directory = output.with_name(output.name + ".harbor-work")
-    trace_runtime = _trace_runtime(args.langfuse)
-    completed = False
-    try:
-        result = asyncio.run(
-            compare_harbor_suite(
-                suite,
-                baseline=baseline,
-                candidate=candidate,
-                work_directory=work_directory,
-                max_concurrency=args.max_concurrency,
-                repeat=args.repeat,
-                progress=not args.no_progress,
-                trace=trace_runtime,
+                shard=arguments.shard,
             )
         )
-        result.write_artifacts(output)
-        completed = True
-    finally:
-        trace_runtime.shutdown()
-        if completed and work_directory.is_dir():
-            shutil.rmtree(work_directory)
-    print(result.summary().model_dump_json(indent=2))
-    print(f"wrote Harbor comparison artifacts to {output}")
-    return 0 if result.passed else 1
+    elif arguments.command == "merge":
+        campaign = _load_campaign(arguments.campaign)
+        report = merge_reports(campaign, arguments.directories)
+    else:
+        report = read_report(arguments.directory)
+    output: dict[str, object] = report.model_dump(mode="json")
+    if arguments.compare is not None:
+        output["comparison"] = report.compare(*arguments.compare).model_dump(mode="json")
+    print(json.dumps(output, indent=2))
+    return report.exit_code
 
 
-if __name__ == "__main__":  # pragma: no cover
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="multiturn-evals")
+    commands = parser.add_subparsers(dest="command", required=True)
+    run_parser = commands.add_parser("run", help="run or resume a campaign")
+    run_parser.add_argument("campaign", help="Python value as module:attribute")
+    run_parser.add_argument("--directory", type=Path, required=True)
+    run_parser.add_argument("--workers", type=int, default=4)
+    run_parser.add_argument("--retry-interrupted", action="store_true")
+    run_parser.add_argument("--langfuse", action="store_true")
+    run_parser.add_argument("--trace-export-timeout", type=float, default=10)
+    run_parser.add_argument(
+        "--capacity",
+        action="append",
+        default=[],
+        metavar="NAME=SLOTS",
+        help="shared local capacity; repeat for more resources",
+    )
+    run_parser.add_argument("--shard", type=_shard, metavar="INDEX/COUNT")
+    run_parser.add_argument("--artifact-files", type=int, default=32)
+    run_parser.add_argument("--artifact-file-bytes", type=int, default=64_000_000)
+    run_parser.add_argument("--artifact-total-bytes", type=int, default=256_000_000)
+    run_parser.add_argument("--compare", nargs=2, metavar=("LEFT", "RIGHT"))
+    report_parser = commands.add_parser("report", help="read a saved report")
+    report_parser.add_argument("directory", type=Path)
+    report_parser.add_argument("--compare", nargs=2, metavar=("LEFT", "RIGHT"))
+    merge_parser = commands.add_parser("merge", help="merge a complete set of static shards")
+    merge_parser.add_argument("campaign", help="Python value as module:attribute")
+    merge_parser.add_argument("directories", type=Path, nargs="+")
+    merge_parser.add_argument("--compare", nargs=2, metavar=("LEFT", "RIGHT"))
+    return parser
+
+
+def _load_campaign(reference: str) -> Campaign:
+    module_name, separator, attribute = reference.partition(":")
+    if not separator or not module_name or not attribute:
+        raise ValueError("campaign must use module:attribute syntax")
+    directory = str(Path.cwd())
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    value = getattr(importlib.import_module(module_name), attribute)
+    if not isinstance(value, Campaign):
+        raise TypeError(f"{reference} is not a Campaign")
+    return value
+
+
+def _capacities(values: Sequence[str]) -> dict[str, int]:
+    capacities: dict[str, int] = {}
+    for value in values:
+        name, separator, slots_text = value.partition("=")
+        if not separator or not name:
+            raise ValueError(f"capacity must use NAME=SLOTS syntax: {value!r}")
+        try:
+            slots = int(slots_text)
+        except ValueError as error:
+            raise ValueError(f"capacity slots must be an integer: {value!r}") from error
+        if name in capacities:
+            raise ValueError(f"capacity {name!r} is specified more than once")
+        capacities[name] = slots
+    return capacities
+
+
+def _shard(value: str) -> Shard:
+    index_text, separator, count_text = value.partition("/")
+    if not separator:
+        raise argparse.ArgumentTypeError("shard must use INDEX/COUNT syntax")
+    try:
+        return Shard(index=int(index_text), count=int(count_text))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,335 +1,320 @@
 # Pydantic multi-turn evals
 
-This package runs adaptive conversation scenarios through Pydantic Evals. Each scenario begins with
-an authored prompt. A simulated user reads each target reply and decides whether to continue,
-accept, or stop. A separate final judge grades only the visible conversation. An optional trajectory
-observer grades bounded transcript prefixes after completion and cannot steer or fail the run.
+This package runs the same cases and evaluators against different execution harnesses. A harness
+may hold a conversation, call an SDK directly, run a benchmark job, manage a sandbox, or delegate
+to a service. The campaign runner does not know which one it received.
 
-The packaged runner supports three local target kinds:
-
-- `pydantic_ai` runs a configured Pydantic AI agent.
-- `command` runs any CLI adapter that implements the versioned JSONL protocol below.
-- `agentenv` runs fixed turn and verifier commands in one AgentENV sandbox per case.
-
-Harbor is supported separately as a whole-arm runner because a Harbor job owns complete trials,
-verification, artifacts, concurrency, and sandbox teardown. It is not invoked once per chat turn.
-
-The target, simulated user, and judge examples use `glm-5.3-flash` through the Z.AI Coding Plan
-endpoint. Credentials come from environment variables, never YAML.
-
-## Choose model providers
-
-Every framework-owned model uses the same `ModelSpec`. The actor, target, and judge may select
-different providers. The provider and its request settings resolve together before a model call.
-
-```yaml
-model:
-  name: gpt-5.4
-  provider:
-    kind: openai
-    interface: responses
-    api_key_env: OPENAI_API_KEY
-  options:
-    thinking: high
-    max_tokens: 1200
-    timeout_seconds: 90
-```
-
-Supported provider kinds are `zai`, `openai`, `anthropic`, and `openai-compatible`. Z.AI keeps an
-explicit `endpoint_plan` because a Coding Plan credential must use its Coding Plan URL. A custom
-OpenAI-compatible route requires `base_url`, accepts either the `chat` or `responses` interface, and
-may omit `api_key_env` for a keyless local server.
-
-Common options are `temperature`, `top_p`, `thinking`, `max_tokens`, and `timeout_seconds`. Omitted
-sampling options stay absent from the provider request. The resolver does not send Z.AI-specific
-fields to other providers.
-
-## Compile and run an experiment
-
-An experiment selects its corpus, actor, target, final judge, trajectory observer, prompts, fixture,
-task subset, harness, execution environment, and limits by name. Explicit arms change one or more
-choices; a matrix expands several axes deterministically. Compilation validates and embeds every
-choice without reading credentials or starting a provider.
-
-```console
-uv run multiturn-evals plan experiments/support-ab.yaml --out outputs/support-ab-plan
-uv run multiturn-evals experiment-run outputs/support-ab-plan
-uv run multiturn-evals resume outputs/support-ab-plan
-```
-
-The checked-in support experiment is intentionally a portability manifest: some arms require
-OpenAI, Anthropic, and DeepSeek credentials. Runtime preflight reports every missing requirement
-before any arm starts. Edit the arm list or supply the named credentials before running it.
-
-Each case gets a durable directory with the frozen input, normal evaluation artifacts, trajectory
-diagnostics, and one terminal receipt. Resume skips completed and failed work. A case left with only
-`started.json` is marked interrupted instead of replaying a possibly state-changing interaction.
-Comparisons pair exact `(scenario_id, repeat_index)` corpus keys across arbitrary named arms.
-Harbor still uses its dedicated whole-job command. It is deliberately not selectable as a session
-harness until a Harbor plan can bind the selected target model and preserve the same frozen arm
-identity without pretending that a provider-specific Harbor agent is portable.
-
-## Run the low-level two-target API
-
-```console
-uv sync --extra tracing
-uv run multiturn-evals validate scenarios/support.yaml --target targets/support.yaml
-uv run multiturn-evals validate scenarios/support.yaml --target targets/support-candidate.yaml
-uv run multiturn-evals compare scenarios/support.yaml \
-  --baseline targets/support.yaml \
-  --candidate targets/support-candidate.yaml \
-  --repeat 3 \
-  --out outputs/support-ab
-```
-
-The baseline and candidate run sequentially with fresh target, simulated-user, judge, and in-memory
-state objects. A failing baseline gate does not skip the candidate. The two arms begin from the same
-authored scenario, but later user turns adapt independently to each target's replies.
-
-Cases are paired by the typed `(scenario_id, repeat_index)` created before evaluation. Score and pass
-rate deltas are reported as candidate minus baseline; they are descriptive rather than claims of
-statistical significance. The compare command exits successfully only when both arm gates pass.
+The shared contract is small:
 
 ```text
-outputs/support-ab/
-  gate.json
-  comparison.json
-  comparison.txt
-  baseline/
-    gate.json
-    report.json
-    report.txt
-    transcripts.jsonl
-    evidence.jsonl
-  candidate/
-    ...
+Case -> Harness -> Evidence -> Evaluator(s) -> TrialResult
+                     |
+                     +-> local typed trace -> optional Langfuse export
 ```
 
-Use `run` for one target:
+`Evidence` keeps three things distinct:
+
+- `public` messages and output that an evaluator may inspect;
+- native checks produced by an authoritative environment verifier;
+- artifact paths inside the isolated trial directory. Non-model evaluators receive resolved,
+  validated handles to those files.
+
+A harness executes. An evaluator decides. A trace exporter observes after the result is durable.
+None of those roles may claim the work of another.
+
+## What is implemented
+
+The included harnesses cover four materially different execution shapes:
+
+- `ConversationHarness` composes an adaptive actor with a stateful target.
+- `FunctionHarness` calls an in-process SDK or application directly.
+- `OneShotCommandHarness` exchanges one bounded JSON request and response with an external job.
+- `CommandTarget` keeps a JSONL child process alive for an entire conversation.
+
+Five vertical adapters use that same contract:
+
+- `AgentEnvTarget` keeps one E2B-compatible sandbox across adaptive turns, verifies inside the
+  sandbox, downloads bounded artifacts, then destroys it.
+- `HarborHarness` runs one task and one native attempt with retries and inner concurrency disabled.
+  Its saved verifier reward, not the CLI exit code, decides the native check. It imports public ATIF
+  dialogue, tool activity, and reported model usage, and supports custom agent import paths.
+- `TemplarHarness` stages an artifact, submits one workflow, persists remote IDs, reads incremental
+  events, accepts only an applied result, and cancels on timeout.
+- `SweBenchHarness` accepts a bounded external solver or the official gold patch, then reads
+  `resolved` from the official saved instance report.
+- `Tau3TextHarness` runs one text simulation in a pinned tau3-bench environment, reads its official
+  reward and trajectory, and imports participant generations and tool calls into the common trace.
+
+`providers.py` supplies Pydantic AI actor, target, and evaluator components plus explicit OpenAI,
+Anthropic, OpenAI-compatible, and Z.AI model binding. The Z.AI coding endpoint never falls through
+to an ambient provider default. Every Pydantic model request writes a typed fact to the local trace
+and is copied into `TrialResult.model_calls`, including its component role, requested binding,
+reported model, provider interface, sampling settings, duration, usage, provider response ID, and
+completed, failed, or cancelled status. These operational receipts are not evaluator evidence.
+
+In a conversation, the actor may use private case data but the target receives only messages and
+trial metadata. Criteria, required checks, and private fixtures are not sent to the system being
+evaluated. A whole-job adapter receives the case as trusted orchestration input and must keep its
+rubric away from the target it launches.
+
+None of these names appears in the campaign runner. Harbor 0.1.44, SWE-bench 5.0.2, and tau3-bench
+1.0.1 have live verification scripts. AgentENV has no live claim without service credentials.
+Templar has a real HTTP contract test but no model-quality claim.
+
+## Install and prove the local system
+
+Python 3.11 and [uv](https://docs.astral.sh/uv/) are required.
 
 ```console
-uv run multiturn-evals run scenarios/support.yaml \
-  --target targets/support.yaml \
-  --out outputs/support
+make install
+make check
 ```
 
-## Run the broad GLM experiment
+`make verify` runs one case and one evaluator through persistent conversation processes, a direct
+function, and one-shot command jobs. It inspects the artifacts, compares exact case/sample pairs,
+then resumes the campaign and proves that no terminal trial was replayed. The fixture is evidence
+for these local boundaries only; it is not evidence that an external benchmark works.
 
-[`experiments/glm-wide.yaml`](experiments/glm-wide.yaml) expands 20 adaptive scenarios across web chat,
-email, ticket, CLI, and API response modes. The scenarios cover 19 task types and nine operating
-contexts. The checked-in lanes run `glm-5.3-flash` directly through Pydantic AI, through one local
-JSONL child process per case, and through the same JSONL contract in a Docker container. Build the
-container harness before running the experiment:
+Run the opt-in Docker integrations separately:
 
 ```console
-scripts/build_glm_harness_image.sh
+make verify-harbor
+make verify-harbor-multiturn
+make verify-swebench
+make install-tau3
+make verify-tau3
 ```
 
-Inspect the resolved plan before making model calls:
+The Harbor proof runs an oracle, a no-op agent, and cancellation through the installed Harbor CLI
+and Docker. The SWE-bench proof evaluates the official gold patch and an irrelevant nonempty patch
+for one pinned verified instance. These prove adapter plumbing and native verifier authority, not
+model quality.
+
+The Tau3 proof installs the pinned upstream checkout in its own Python 3.12 environment. It runs
+the official mock state-change task and airline policy-refusal task against a deterministic local
+OpenAI-compatible model server, then requires both native rewards to pass. This proves the real
+tau3-bench orchestration, environment, evaluator, result import, and concurrent process boundary;
+it does not claim remote-model quality.
+
+## Run a campaign
+
+Campaigns are Python values, so executable components are bound directly instead of recovered from
+strings spread across catalogs and YAML files.
 
 ```console
-uv run multiturn-evals plan experiments/glm-wide.yaml --out outputs/glm-wide
+uv run multiturn-evals run examples.offline_campaign:campaign \
+  --directory outputs/offline \
+  --workers 3 \
+  --compare baseline candidate
 ```
 
-Run or resume its saved plan:
+The example exits with status 1 on purpose because the baseline fails quality. Read the saved report
+without running any trial:
 
 ```console
-uv run multiturn-evals experiment-run outputs/glm-wide
-uv run multiturn-evals resume outputs/glm-wide
+uv run multiturn-evals report outputs/offline --compare baseline candidate
 ```
 
-Each case writes its evaluation artifacts and a terminal receipt before the coordinator marks it
-complete. Resume skips completed and failed cases. It marks a previously started case as interrupted
-instead of replaying possible external side effects. See [the scale-run design](docs/scale-campaign.md)
-for the data and recovery contract.
+Run the same campaign and directory again to resume. Completed, failed, and interrupted trials are
+not replayed. `--retry-interrupted` is explicit because the first attempt may have changed a remote
+system before the process stopped.
 
-The manual [`Scale evals`](.github/workflows/scale-evals.yml) workflow runs the same experiment and
-uploads the complete run directory even when the quality gate fails.
+Exit status 0 means all trials completed and passed. Status 1 means execution completed but at least
+one trial failed a native check or evaluator criterion. Status 2 means a trial failed to execute or
+was interrupted.
 
-## Plug in another CLI harness
+## Run at scale
 
-[`targets/command-example.yaml`](targets/command-example.yaml) shows the command target format. `argv`
-is passed directly to `asyncio.create_subprocess_exec`; shell strings are not supported. `cwd`
-resolves relative to the target YAML. The child receives only names listed in `inherit_env`, and the
-experiment compiler adds the credential named by the selected target model. The configuration
-cannot contain environment values.
+Attach the same resource name to variants that compete for the same capacity:
 
-One process is opened for each scenario and repeat. The runner writes one JSON object per line. The
-process first receives `start` and must answer `ready`:
-
-```json
-{"protocol":2,"type":"start","session":{"suite":"support-smoke","target":"command-example","scenario_id":"refund-needs-order-number","repeat_index":1,"run_id":"...","comparison_id":null,"arm":"baseline","target_model":{"name":"glm-5.3-flash","provider":{"kind":"zai"},"options":{"max_tokens":900,"timeout_seconds":90}},"target_instructions":"Give safe, concrete steps.","fixture":[]}}
-{"protocol":2,"type":"ready"}
+```python
+Variant(
+    name="candidate",
+    harness=harbor,
+    evaluators=evaluators,
+    resources=(ResourceClaim(name="docker", slots=1),),
+)
 ```
 
-Each turn contains the complete visible history. Reply IDs must match:
-
-```json
-{"protocol":2,"type":"turn","id":1,"messages":[{"role":"user","content":"I need a refund."}]}
-{"protocol":2,"type":"reply","id":1,"assistant_text":"What is your order number?","session_id":"optional","evidence":{"route":"refund-intake"}}
-```
-
-At the end of the conversation, protocol 2 requires a final exchange before teardown:
-
-```json
-{"protocol":2,"type":"finish","outcome":{"transcript":{"exchanges":[]},"decisions":[],"termination":{"kind":"turn_limit_reached","limit":1}}}
-{"protocol":2,"type":"finished","completion":{}}
-```
-
-The runner then sends `{"protocol":2,"type":"close"}` and closes stdin. There is no protocol 1
-fallback. Startup, each reply, stdout line size, retained stderr, and shutdown are bounded. Timeout
-and cancellation terminate the whole process group and reap the direct child. The adapter in
-[`examples/jsonl_harness.py`](examples/jsonl_harness.py) is a small executable reference.
-
-Only `assistant_text` becomes conversation text. Timing, the optional session ID, the sanitized
-executable name, and JSON evidence are written to `evidence.jsonl`. They are excluded from the judge
-request and Langfuse metadata. Failed commands add their bounded stderr to the local evidence file;
-the traced exception reports only its byte count. Do not put secrets in `argv`; operating-system
-process listings may show arguments even though this runner does not trace them.
-
-## Run a target in AgentENV
-
-[`targets/agentenv-example.yaml`](targets/agentenv-example.yaml) defines a native AgentENV target.
-The host uses AgentENV's E2B-compatible SDK and reads `E2B_API_URL`, `E2B_SANDBOX_URL`, and
-`E2B_API_KEY` from the environment. The YAML stores only those names. Install the optional client
-and run it through the normal local A/B coordinator:
+Allocate that resource for one invocation and, when needed, select a static shard:
 
 ```console
-uv sync --extra agentenv --extra tracing
-uv run multiturn-evals compare scenarios/support.yaml \
-  --baseline targets/agentenv-baseline.yaml \
-  --candidate targets/agentenv-candidate.yaml \
-  --out outputs/agentenv-ab \
+uv run multiturn-evals run my_campaigns:campaign \
+  --directory outputs/part-0 --workers 16 --capacity docker=4 --shard 0/4
+```
+
+The scheduler starts the oldest trial whose complete resource claim fits. Capacity waiting occurs
+before the attempt directory and case deadline, and a permit remains held through harness cleanup.
+Claims are shared across variants, so Harbor and SWE-bench can draw from one local Docker pool.
+
+Run every shard in a separate directory, then merge after all roots are closed:
+
+```console
+uv run multiturn-evals merge my_campaigns:campaign \
+  outputs/part-0 outputs/part-1 outputs/part-2 outputs/part-3 \
+  --compare baseline candidate
+```
+
+All variants for one `(case, sample)` pair stay on one shard. Merge rejects missing, duplicate,
+foreign, or incompatible results. Separate hosts must use separate roots and divide any
+account-wide quota themselves; this is static distribution, not a lease service.
+
+### Pydantic AI concurrency run
+
+Run 1,000 trials through `PydanticActor`, `PydanticTarget`, `ConversationHarness`, and
+`PydanticJudge` with 128 concurrent workers:
+
+```console
+uv run python -m scripts.run_pydantic_scale \
+  --cases 100 --samples 5 --workers 128 --model-delay-ms 20
+```
+
+The runner uses two distinct target profiles, executes four Pydantic model requests per trial,
+checks every authored task reaches the target response, and requires each saved trial receipt to
+contain two actor calls, one target call, one judge call, and their reported usage. It then resumes
+the same campaign and requires zero model calls. The retained `scale-summary.json` records
+throughput, peak model concurrency, in-memory and durable model-call counts, aggregate usage, pass
+count, receipt count, trace count, Python version, Pydantic AI version, and source-tree state.
+
+The default models are Pydantic AI `FunctionModel` instances with structured actor and judge output.
+This measures the complete local Pydantic AI orchestration and persistence path. It does not claim
+throughput for OpenAI, Anthropic, Z.AI, or another remote provider. Swap the explicit `BoundModel`
+objects for provider bindings when measuring a configured provider.
+
+### Harbor benchmark canaries
+
+Run one registry task from five different Harbor domains under a shared two-container capacity:
+
+```console
+uv run python -m scripts.run_harbor_benchmark_pack
+```
+
+The default pack covers Terminal-Bench Sample, BFCL, DABstep, CooperBench, and GAIA. It pins one
+exact task ID per dataset, preserves each native Harbor result in the common attempt directory, and writes a
+`pack-summary.json` under `outputs/harbor-benchmark-pack/`. CooperBench's published images require
+`linux/amd64`, so the pack declares that Docker platform and records it in the campaign manifest.
+
+The default `oracle` run is an adapter and verifier canary, not a model score. Use `--agent`,
+`--model`, and explicit `--inherit NAME` arguments for a configured model run. Environment variable
+values are passed only to the Harbor process; the manifest stores their names.
+
+### Harbor multi-turn integration
+
+Harbor remains a whole-job harness. It owns the agent, sandbox, and native verifier. The campaign
+owns samples, comparisons, evaluator criteria, receipts, and resume. The adapter imports ATIF text,
+tool observations, and reported model usage into the common trace. Transcript exposure to judges
+requires `public_trajectory=True`. Set it only for tasks whose user, agent, and tool text is safe to
+send to the configured judge. It is an explicit trust choice, not a secret scrubber. ATIF system
+steps, separate reasoning fields, and native metadata stay out of judge input. Per-call durations
+are `null` when the native trajectory does not report them.
+
+Run the complete local integration with Harbor 0.1.44 and Docker:
+
+```console
+make verify-harbor-multiturn
+```
+
+The default run executes six trials through a custom Harbor agent. Each trial makes four HTTP
+requests to a deterministic local model fixture and uses real Docker commands to read state, write
+an answer, and read it back. `PydanticJudge` uses deterministic model responses to check the imported
+transcript. The script proves native-verifier failure and evaluator failure independently, exact
+sample pairing, resume without new model calls, export-error isolation, and container cleanup.
+It saves common receipts, native Harbor artifacts, traces, and `summary.json` under
+`outputs/harbor-multiturn/`. Use `--directory`, `--samples`, `--workers`, and `--docker-capacity` to
+configure a fresh verification run. The fixture script checks resume while its local servers remain
+alive; rerunning that script requires a fresh directory because server endpoints are part of the
+campaign identity. The real-provider CLI example below also supports resume across process restarts.
+The separate `make verify-harbor` command tests cancellation.
+These are integration checks, not model-quality scores. The manual **Harbor integration** GitHub
+Actions workflow runs the Docker checks and retains the multi-turn artifacts.
+
+For a bounded real-model check, set `ZAI_API_KEY` and run:
+
+```console
+uv run multiturn-evals run examples.harbor_zai_campaign:campaign \
+  --directory outputs/harbor-zai --workers 2 --capacity docker=1 --compare noop candidate
+```
+
+This runs Harbor's `terminus-2` with `zai/glm-4.7` and a Pydantic judge against the Z.AI coding
+endpoint. It makes real provider requests. The `noop` baseline is expected to fail quality, so a
+successful comparison normally exits with status 1. Reuse the same directory to resume without
+replaying completed trials. This small stateful task is a wiring check, not a general model benchmark.
+
+Custom agents use `HarborHarness(agent_import_path="module:AgentClass", agent_arguments={...})`.
+The module must be importable in Harbor's separate environment. Pass credentials through named
+`inherit_environment` entries, never agent arguments. Harbor 0.1.44 is the verified version;
+`harbor_version` records the declared dependency and does not install or select it.
+
+### Tau3 text runs
+
+`Tau3TextHarness` treats tau3-bench as a whole-job harness because tau3-bench owns the simulated
+user, agent, domain environment, tools, and native evaluation. Install its pinned dependency
+environment once, then run the two-domain verification:
+
+```console
+make install-tau3
+make verify-tau3
+```
+
+Exercise the same real boundary concurrently:
+
+```console
+uv run python -m scripts.verify_tau3 \
+  --directory outputs/tau3/two-domain \
+  --samples 10 --workers 8
+```
+
+The adapter itself accepts arbitrary text domains, task sets, splits, task IDs, agent/user
+implementations, models, and model arguments. Each core trial launches one external tau3-bench
+simulation with its inner concurrency and retries disabled. Provider credentials must be named in
+`inherit_environment`; putting credentials in persisted model arguments is rejected.
+
+## Add a harness
+
+Implement one method and give the component a stable manifest definition:
+
+```python
+class MyHarness:
+    component = ComponentDefinition(kind="my-harness", version="1")
+
+    async def run(self, case, trial, trace) -> Evidence: ...
+```
+
+The harness owns its external lifecycle, including cleanup and native verification. It returns
+public output, native checks, and relative artifact paths. It does not run quality evaluators or
+write campaign receipts. The same `Case`, evaluator tuple, runner, report, comparison, and trace
+schema then work without a branch in core code.
+
+External commands inherit no ambient environment variables. Set `inherit_environment=("NAME",)` on
+the target or job for each variable it needs. The manifest records the names, never their values.
+Do not put credentials in command arguments.
+
+For a separate dependency environment, use `OneShotCommandHarness` as the bounded process boundary.
+For an interactive program, implement a target for `ConversationHarness`. Use `FunctionHarness`
+when an SDK already exposes the whole task as one call.
+
+## Langfuse
+
+Every attempt writes `events.jsonl` before any external export. Enable Langfuse with its normal
+environment variables, the non-secret `LANGFUSE_PROJECT_ID` from the project's settings or URL,
+and `--langfuse`:
+
+```console
+uv run multiturn-evals run examples.offline_campaign:campaign \
+  --directory outputs/offline-langfuse \
   --langfuse
 ```
 
-Each planned `(scenario_id, repeat_index)` gets one sandbox with a provider TTL. Every turn writes
-the complete visible history to a bounded request file and runs the configured `turn` command. The
-command writes a bounded response file. After the conversation, the runner writes the terminal
-outcome and runs the configured verifier while the sandbox is still alive. It then destroys the
-sandbox in a bounded cleanup step. [`examples/agentenv_turn.py`](examples/agentenv_turn.py) and
-[`examples/agentenv_verify.py`](examples/agentenv_verify.py) show the two file contracts; bake them
-and the evaluated harness into the named AgentENV template.
+Langfuse receives one trial observation, generation observations for model-call facts, span
+observations for the remaining typed events, and evaluator scores. Generations carry model,
+provider, sampling, usage, cost, status, and response-ID metadata from the durable receipt. The
+synchronous SDK runs in a child process that the export timeout can terminate. An export failure is
+written to `trace-export-errors.json`; it cannot change the already-written trial result. The runner
+writes `report.json` before bounded exports begin. It stores one stable export identity and
+successful exporter definitions per attempt, scoped to the base URL and project ID. A resume retries
+pending exports without replaying the harness. Observation and score IDs stay stable across retries
+so previously delivered records are updated. Keep `LANGFUSE_PROJECT_ID` consistent with the project
+selected by the credentials; rotating keys for that project does not require changing its ID.
 
-The transcript judge and environment verifier are independent. A case passes only when the LLM
-judge passes and the present environment verifier passes. The verifier reward, reason, sandbox ID,
-and structured evidence go to `evidence.jsonl`, never to the judge request. A hard loss of the host
-process can still leave a sandbox until its TTL, so this integration does not claim crash recovery.
-
-Run the live SDK check before relying on a new AgentENV deployment:
-
-```console
-uv run --extra agentenv python scripts/compat_smoke.py agentenv \
-  --template pydantic-multiturn-eval-v1
-```
-
-## Run complete arms through Harbor
-
-Harbor configurations live under [`harbor/`](harbor/). Each arm file points to its own Harbor base
-job configuration and a task template. The compiler creates one deterministic Harbor task per case,
-sets `n_attempts: 1`, and gives Harbor the requested concurrency limit. Baseline and candidate are
-always separate sequential jobs:
-
-```console
-uv run multiturn-evals harbor-compare scenarios/support.yaml \
-  --baseline harbor/baseline.example.yaml \
-  --candidate harbor/candidate.example.yaml \
-  --repeat 3 \
-  --max-concurrency 4 \
-  --out outputs/harbor-ab \
-  --langfuse
-```
-
-The example command pins `harbor[e2b]==0.22.0` in a Python 3.12 `uvx` environment and installs the
-dependency-light shim in [`harbor/harbor_adapter`](harbor/harbor_adapter). Harbor 0.22 and Pydantic AI
-2.42 require incompatible major versions of the OpenAI Python package, so the shim does not import
-the evaluator package. It sends each private actor decision to
-`pydantic_multiturn_evals.harbor_actor_worker` in the project's own environment over bounded stdin
-and stdout. This preserves the same Pydantic actor without mixing the two dependency graphs.
-
-The private user agent reads the authored scenario, sends the exact first prompt through Harbor's
-ACP bridge, adapts later messages, and writes a normalized transcript. The outer process reads only
-Harbor's saved `result.json` and that transcript artifact; it never infers success from console
-output. It then runs the same transcript-only LLM judge and combines that verdict with Harbor's
-named verifier reward.
-
-Harbor's documented simulated-user path currently uses ACP. Use a target agent supported by that
-bridge; the checked-in example uses Claude Code. A non-ACP CLI belongs in the direct `command` or
-`agentenv` path. Do not configure a native `agentenv` target inside Harbor: Harbor's E2B environment
-owns the AgentENV sandbox in this mode, so nesting another sandbox would make teardown and verifier
-ownership ambiguous.
-
-Copy the two base job examples and change their target agent or model settings independently for a
-real A/B comparison. Keep credentials out of those files. Harbor arm configs explicitly allowlist
-which host environment variables reach the Harbor process, and literal secret-looking fields in a
-base config are rejected.
-
-## Scenarios and judging
-
-[`scenarios/support.yaml`](scenarios/support.yaml) is the working suite. A scenario owns its first
-prompt, a private simulated-user brief, a final judge rubric, and optional turn and timeout limits.
-Suite-level settings provide defaults. Unknown YAML fields fail validation and scenario IDs must be
-unique.
-
-The whole adaptive conversation is one Pydantic Evals case. The `TranscriptJudge` explicitly removes
-the case input and projects the result to visible user and assistant exchanges before calling
-Pydantic's `LLMJudge`. Private personas, actor decisions, termination reasons, command evidence, and
-stderr do not enter the judge request.
-
-## Langfuse tracing
-
-Tracing is optional:
-
-```console
-export LANGFUSE_PUBLIC_KEY=...
-export LANGFUSE_SECRET_KEY=...
-export LANGFUSE_BASE_URL=https://cloud.langfuse.com
-uv run multiturn-evals compare scenarios/support.yaml \
-  --baseline targets/support.yaml \
-  --candidate targets/support-candidate.yaml \
-  --out outputs/support-ab \
-  --langfuse
-```
-
-Comparison, arm, and scenario executions are separate Langfuse traces correlated by
-`comparison_id`; local target turns and instrumented model calls are children of their scenario
-trace. Allowlisted metadata identifies the arm, target, execution kind, scenario, repeat, run, and
-turn. Harbor normalization also records its job and trial IDs. Judge score, judge pass, environment
-reward and pass, arm gate, mean score, pass rate, and comparison deltas are explicit scores. Pydantic
-AI instrumentation also exports model prompts and responses when tracing is enabled; configure
-Langfuse according to your data policy. GitHub Actions sets `LANGFUSE_RELEASE` to the evaluated
-commit. The runner calls Langfuse shutdown in a `finally` block.
-
-Checked-in YAML remains the source of truth. Langfuse dataset sync is deliberately not part of a CI
-run, so a remote dataset edit cannot silently change a pull-request evaluation. Two hosted Langfuse
-dataset experiment runs can be added later if the Langfuse comparison UI is required.
-
-## State and automation
-
-Conversation state is saved after every complete transition in an `InMemoryStateStore`. Redis is not
-needed for one local process or GitHub Actions job and would not make external target effects
-exactly-once. A target that changes an external database, queue, browser profile, or service remains
-responsible for isolating or resetting that state between arms.
-
-`make check` runs formatting, lint, type checking, and behavior tests. `make compat` recompiles both
-Harbor arms twice with no credentials or remote services. The normal
-[`ci.yml`](.github/workflows/ci.yml) path needs no credentials. The manual
-[`live-evals.yml`](.github/workflows/live-evals.yml) workflow runs both checked-in target configs with
-Langfuse tracing and always uploads the complete comparison directory. Configure its `evals`
-environment with `ZAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY`.
-
-The manual [`environment-evals.yml`](.github/workflows/environment-evals.yml) workflow selects either
-the native AgentENV comparison or the Harbor comparison. It connects to a remote AgentENV deployment;
-GitHub-hosted runners do not host the KVM service themselves. Add `E2B_API_URL`, `E2B_SANDBOX_URL`,
-and `E2B_API_KEY` to the same environment. The checked-in AgentENV template names must already exist.
-The Harbor example also needs `ANTHROPIC_API_KEY` for its Claude Code target. Both paths upload their
-artifacts even when the quality gate fails.
-
-The model integration is pinned to Pydantic Evals and Pydantic AI 2.42, the AgentENV client to E2B
-2.46.4, and the external Harbor command to Harbor 0.22.0. See the official
-[Pydantic Evals overview](https://pydantic.dev/docs/ai/evals/evals/),
-[LLMJudge guide](https://pydantic.dev/docs/ai/evals/evaluators/llm-judge/), and
-[Langfuse SDK experiments](https://langfuse.com/docs/evaluation/experiments/experiments-via-sdk),
-plus [Harbor core concepts](https://www.harborframework.com/docs/core-concepts),
-[Harbor simulated users](https://www.harborframework.com/docs/run-jobs/simulated-user), and the
-[AgentENV E2B integration](https://kvcache-ai.github.io/AgentENV/latest/integration/e2b.html).
+See [the core design record](docs/design.md) and [the adapter design](docs/adapters.md) for ownership,
+receipts, scale boundaries, and adapter acceptance rules.

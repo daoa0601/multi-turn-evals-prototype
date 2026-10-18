@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  quality:
+  check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -18,7 +18,5 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install 3.11
-      - run: uv sync --all-extras --locked
+      - run: uv sync --locked --all-extras
       - run: make check
-      - run: make validate
-      - run: make compat

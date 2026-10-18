@@ -1,127 +1,115 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 
-from pydantic_multiturn_evals.cli import build_parser, main
+from pydantic_multiturn_evals import (
+    Campaign,
+    Case,
+    ComponentDefinition,
+    Evidence,
+    TraceRecorder,
+    Trial,
+    Variant,
+    run,
+)
+from pydantic_multiturn_evals.cli import main
+from pydantic_multiturn_evals.harnesses import FunctionHarness
 
-ROOT = Path(__file__).parents[1]
+
+def test_cli_preserves_quality_failure_when_reading_a_resumed_run(tmp_path: Path) -> None:
+    reference = "examples.offline_campaign:campaign"
+
+    assert main(["run", reference, "--directory", str(tmp_path), "--workers", "3"]) == 1
+    assert main(["run", reference, "--directory", str(tmp_path), "--workers", "3"]) == 1
+    assert main(["report", str(tmp_path), "--compare", "baseline", "candidate"]) == 1
 
 
-def test_validate_command_needs_no_provider_key(capsys: object) -> None:
-    exit_code = main(
-        [
-            "validate",
-            str(ROOT / "scenarios" / "support.yaml"),
-            "--target",
-            str(ROOT / "targets" / "support.yaml"),
-        ]
+def test_cli_preserves_execution_failure_from_a_saved_report(tmp_path: Path) -> None:
+    async def broken(_case: Case, _trial: Trial, _trace: TraceRecorder) -> Evidence:
+        raise RuntimeError("target unavailable")
+
+    campaign = Campaign(
+        name="execution-failure",
+        revision="1",
+        cases=(Case(name="case", task="run", required_checks=("done",)),),
+        variants=(
+            Variant(
+                name="direct",
+                harness=FunctionHarness(
+                    component=ComponentDefinition(kind="broken-target", version="1"),
+                    function=broken,
+                ),
+            ),
+        ),
+    )
+    asyncio.run(run(campaign, directory=tmp_path))
+
+    assert main(["report", str(tmp_path)]) == 2
+
+
+def test_cli_runs_separate_static_shards_and_merges_exact_pairs(tmp_path: Path) -> None:
+    reference = "examples.offline_campaign:campaign"
+    roots = (tmp_path / "shard-0", tmp_path / "shard-1")
+
+    for index, root in enumerate(roots):
+        assert (
+            main(
+                [
+                    "run",
+                    reference,
+                    "--directory",
+                    str(root),
+                    "--shard",
+                    f"{index}/2",
+                ]
+            )
+            == 1
+        )
+    assert (
+        main(
+            [
+                "merge",
+                reference,
+                *(str(root) for root in roots),
+                "--compare",
+                "baseline",
+                "candidate",
+            ]
+        )
+        == 1
     )
 
-    assert exit_code == 0
 
+def test_installed_cli_loads_campaign_from_working_directory(tmp_path: Path) -> None:
+    (tmp_path / "authored.py").write_text(
+        "from pydantic_multiturn_evals import "
+        "Campaign, Case, ComponentDefinition, Evidence, NativeCheck, Variant\n"
+        "from pydantic_multiturn_evals.harnesses import FunctionHarness\n"
+        "async def task(case, trial, trace):\n"
+        "    return Evidence(checks=(NativeCheck(name='done', passed=True, reason='done'),))\n"
+        "campaign = Campaign(name='local', revision='1', "
+        "cases=(Case(name='case', task='Run', required_checks=('done',)),), "
+        "variants=(Variant(name='direct', harness=FunctionHarness("
+        "component=ComponentDefinition(kind='local', version='1'), function=task)),))\n",
+        encoding="utf-8",
+    )
+    executable = Path(sys.executable).parent / "multiturn-evals"
+    environment = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
 
-def test_plan_compiles_an_experiment_without_provider_credentials(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    for name in ("ZAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
-    output = tmp_path / "planned"
-
-    exit_code = main(
-        [
-            "plan",
-            str(ROOT / "experiments" / "support-ab.yaml"),
-            "--out",
-            str(output),
-        ]
+    result = subprocess.run(
+        [str(executable), "run", "authored:campaign", "--directory", "results"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
 
-    assert exit_code == 0
-    assert (output / "plan.json").exists()
-    assert (output / "summary.json").exists()
-
-
-def test_compare_command_requires_two_named_configs() -> None:
-    args = build_parser().parse_args(
-        [
-            "compare",
-            "suite.yaml",
-            "--baseline",
-            "baseline.yaml",
-            "--candidate",
-            "candidate.yaml",
-            "--out",
-            "output",
-        ]
-    )
-
-    assert args.baseline == Path("baseline.yaml")
-    assert args.candidate == Path("candidate.yaml")
-
-
-def test_harbor_compare_has_two_explicit_arm_configs() -> None:
-    args = build_parser().parse_args(
-        [
-            "harbor-compare",
-            "suite.yaml",
-            "--baseline",
-            "baseline.yaml",
-            "--candidate",
-            "candidate.yaml",
-            "--out",
-            "output",
-        ]
-    )
-
-    assert args.baseline == Path("baseline.yaml")
-    assert args.candidate == Path("candidate.yaml")
-
-
-def test_harbor_compare_writes_results_and_removes_successful_workdir(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    class FakeTrace:
-        def shutdown(self) -> None:
-            return None
-
-    class FakeResult:
-        passed = True
-
-        def write_artifacts(self, output: Path) -> None:
-            output.mkdir(parents=True)
-            (output / "gate.json").write_text("{}")
-
-        def summary(self) -> SimpleNamespace:
-            return SimpleNamespace(model_dump_json=lambda indent: '{"passed":true}')
-
-    async def fake_compare(*args: object, **kwargs: object) -> FakeResult:
-        work_directory = kwargs["work_directory"]
-        assert isinstance(work_directory, Path)
-        work_directory.mkdir(parents=True)
-        return FakeResult()
-
-    monkeypatch.setattr("pydantic_multiturn_evals.cli.load_suite", lambda path: object())
-    monkeypatch.setattr("pydantic_multiturn_evals.cli.load_harbor_arm", lambda path: object())
-    monkeypatch.setattr("pydantic_multiturn_evals.cli.compare_harbor_suite", fake_compare)
-    monkeypatch.setattr("pydantic_multiturn_evals.cli._trace_runtime", lambda enabled: FakeTrace())
-    output = tmp_path / "output"
-
-    exit_code = main(
-        [
-            "harbor-compare",
-            "suite.yaml",
-            "--baseline",
-            "baseline.yaml",
-            "--candidate",
-            "candidate.yaml",
-            "--out",
-            str(output),
-        ]
-    )
-
-    assert exit_code == 0
-    assert (output / "gate.json").exists()
-    assert not (tmp_path / "output.harbor-work").exists()
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["results"][0]["terminal"]["evidence"]["checks"][0]["passed"] is True

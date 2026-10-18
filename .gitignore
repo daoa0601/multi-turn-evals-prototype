@@ -10,3 +10,5 @@ build/
 outputs/
 .env
 .references/
+.external/
+.DS_Store
