@@ -296,7 +296,8 @@ when an SDK already exposes the whole task as one call.
 ## Langfuse
 
 Every attempt writes `events.jsonl` before any external export. Enable Langfuse with its normal
-environment variables and `--langfuse`:
+environment variables, the non-secret `LANGFUSE_PROJECT_ID` from the project's settings or URL,
+and `--langfuse`:
 
 ```console
 uv run multiturn-evals run examples.offline_campaign:campaign \
@@ -310,8 +311,10 @@ provider, sampling, usage, cost, status, and response-ID metadata from the durab
 synchronous SDK runs in a child process that the export timeout can terminate. An export failure is
 written to `trace-export-errors.json`; it cannot change the already-written trial result. The runner
 writes `report.json` before bounded exports begin. It stores one stable export identity and
-successful exporter definitions per attempt, so a resume retries pending exports without replaying
-the harness.
+successful exporter definitions per attempt, scoped to the base URL and project ID. A resume retries
+pending exports without replaying the harness. Observation and score IDs stay stable across retries
+so previously delivered records are updated. Keep `LANGFUSE_PROJECT_ID` consistent with the project
+selected by the credentials; rotating keys for that project does not require changing its ID.
 
 See [the core design record](docs/design.md) and [the adapter design](docs/adapters.md) for ownership,
 receipts, scale boundaries, and adapter acceptance rules.

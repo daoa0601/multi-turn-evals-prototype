@@ -268,6 +268,7 @@ class SweBenchHarness:
         ]
         command.extend(("--gold",) if prediction is None else ("--predictions", str(prediction)))
         environment = command_environment(self.evaluator_environment, directory)
+        cleanup_required = True
         try:
             stdout, stderr, returncode = await _command(
                 tuple(command),
@@ -279,28 +280,29 @@ class SweBenchHarness:
                 stderr_bytes=self.stderr_bytes,
                 label="SWE-bench verifier",
             )
-        except BaseException:
-            await self._cleanup_verifier(task.instance, run_id, directory, environment)
-            raise
-        (directory / "swebench.stdout.txt").write_bytes(stdout)
-        (directory / "swebench.stderr.txt").write_bytes(stderr)
-        report = _find_instance_report(
-            directory / "logs" / "run_evaluation" / run_id, task.instance
-        )
-        if report is None:
-            detail = stderr.decode(errors="replace").strip()
-            raise HarnessError(
-                "verify",
-                f"SWE-bench verifier exited with code {returncode} without an instance report"
-                + (f": {detail}" if detail else ""),
+            (directory / "swebench.stdout.txt").write_bytes(stdout)
+            (directory / "swebench.stderr.txt").write_bytes(stderr)
+            report = _find_instance_report(
+                directory / "logs" / "run_evaluation" / run_id, task.instance
             )
-        try:
-            value = json.loads(report.read_text(encoding="utf-8"))[task.instance]["resolved"]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
-            raise HarnessError("protocol", f"invalid SWE-bench report {report}") from error
-        if not isinstance(value, bool):
-            raise HarnessError("protocol", f"SWE-bench report {report} has no boolean resolved")
-        return report, value
+            if report is None:
+                detail = stderr.decode(errors="replace").strip()
+                raise HarnessError(
+                    "verify",
+                    f"SWE-bench verifier exited with code {returncode} without an instance report"
+                    + (f": {detail}" if detail else ""),
+                )
+            try:
+                value = json.loads(report.read_text(encoding="utf-8"))[task.instance]["resolved"]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+                raise HarnessError("protocol", f"invalid SWE-bench report {report}") from error
+            if not isinstance(value, bool):
+                raise HarnessError("protocol", f"SWE-bench report {report} has no boolean resolved")
+            cleanup_required = returncode != 0
+            return report, value
+        finally:
+            if cleanup_required:
+                await self._cleanup_verifier(task.instance, run_id, directory, environment)
 
     async def _cleanup_verifier(
         self,

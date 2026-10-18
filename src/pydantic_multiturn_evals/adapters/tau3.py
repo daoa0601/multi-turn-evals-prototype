@@ -489,7 +489,7 @@ def _model_call(
         provider=profile.provider,
         interface=profile.interface,
         sampling=arguments,
-        duration_seconds=max(message.generation_time_seconds or 0, 0),
+        duration_seconds=message.generation_time_seconds,
         status="completed",
         usage=_model_usage(message),
     )

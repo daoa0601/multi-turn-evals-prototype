@@ -14,20 +14,20 @@ from langfuse import Langfuse
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExportResult
+from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 
 from pydantic_multiturn_evals.model import TraceEvent, TrialKey, TrialResult
-from pydantic_multiturn_evals.tracing import export_with_langfuse_client
+from pydantic_multiturn_evals.tracing import (
+    LANGFUSE_OBSERVATION_ID,
+    export_with_langfuse_client,
+)
 
 
 def main() -> int:
     payload = json.loads(sys.stdin.readline())
     public_key = os.environ["LANGFUSE_PUBLIC_KEY"]
     secret_key = os.environ["LANGFUSE_SECRET_KEY"]
-    base_url = (
-        os.environ.get("LANGFUSE_BASE_URL")
-        or os.environ.get("LANGFUSE_HOST")
-        or "https://cloud.langfuse.com"
-    ).rstrip("/")
+    base_url = payload["base_url"]
     authorization = b64encode(f"{public_key}:{secret_key}".encode()).decode("ascii")
     timeout = int(os.environ.get("LANGFUSE_TIMEOUT", "5"))
     spans = _CheckedSpanExporter(
@@ -36,7 +36,12 @@ def main() -> int:
         timeout=timeout,
     )
     with _CheckedScoreClient(timeout=timeout) as scores:
-        client = Langfuse(base_url=base_url, span_exporter=spans, httpx_client=scores)
+        client = Langfuse(
+            base_url=base_url,
+            span_exporter=spans,
+            httpx_client=scores,
+            id_generator=_ObservationIdGenerator(),
+        )
         try:
             export_with_langfuse_client(
                 client,
@@ -51,6 +56,12 @@ def main() -> int:
         if failures:
             raise RuntimeError("Langfuse delivery failed; export remains pending") from failures[0]
     return 0
+
+
+class _ObservationIdGenerator(RandomIdGenerator):
+    def generate_span_id(self) -> int:
+        identifier = LANGFUSE_OBSERVATION_ID.get()
+        return identifier if identifier is not None else super().generate_span_id()
 
 
 class _CheckedSpanExporter(OTLPSpanExporter):

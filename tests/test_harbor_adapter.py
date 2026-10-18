@@ -339,6 +339,7 @@ trial = trial / arguments[arguments.index('--job-name') + 1] / 'case__trial'
     assert sum(item.output_tokens for item in usage if item.output_tokens is not None) == 18
     assert sum(item.cost_usd or 0 for item in usage) == pytest.approx(0.03)
     assert all(call.duration_seconds is None for call in result.model_calls)
+    assert [item.cache_read_tokens for item in usage] == [20, None]
     assert all(call.provider == "harbor" for call in result.model_calls)
     events = _events(tmp_path / "run")
     assert sum(isinstance(event.fact, MessageFact) for event in events) == 4

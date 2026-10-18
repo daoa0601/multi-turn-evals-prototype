@@ -11,7 +11,9 @@ import pytest
 
 from pydantic_multiturn_evals import Campaign, Case, Completed, Failed, TrialBudget, Variant, run
 from pydantic_multiturn_evals.adapters import TemplarArtifact, TemplarHarness, TemplarTask
-from pydantic_multiturn_evals.model import LifecycleFact, TraceEvent
+from pydantic_multiturn_evals.evaluation import HarnessError
+from pydantic_multiturn_evals.model import LifecycleFact, TraceEvent, Trial, TrialKey
+from pydantic_multiturn_evals.tracing import LocalTrace
 
 
 class _TemplarService(ThreadingHTTPServer):
@@ -23,6 +25,8 @@ class _TemplarService(ThreadingHTTPServer):
     status_override: tuple[int, Any] | None
     submission_override: Any
     cancel_status: int
+    cancel_started: threading.Event
+    cancel_release: threading.Event
     ready: threading.Event
 
     def service_actions(self) -> None:
@@ -51,6 +55,8 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             )
         elif self.path == "/api/runs/run-1/cancel":
+            self._service.cancel_started.set()
+            self._service.cancel_release.wait(timeout=5)
             self._send(
                 self._service.cancel_status,
                 {"runId": "run-1", "status": "interrupted", "lastSequence": 1},
@@ -116,7 +122,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            # Deadline tests can close the connection before the service responds.
+            pass
 
 
 def test_templar_adapter_stages_polls_and_uses_the_accepted_evaluation(
@@ -166,6 +176,67 @@ def test_templar_adapter_cancels_a_remote_run_when_the_case_times_out(tmp_path: 
     assert any(path == "/api/runs/run-1/cancel" for _method, path, _body in service.requests)
     state = json.loads(next((tmp_path / "run").glob("trials/**/templar-state.json")).read_text())
     assert state["phase"] == "cancelled"
+
+
+@pytest.mark.parametrize("trigger", ["cancellation", "protocol-error"])
+@pytest.mark.parametrize("cancel_response", [True, False], ids=["confirmed", "timed-out"])
+def test_templar_waits_for_remote_cleanup_through_additional_cancellations(
+    tmp_path: Path, trigger: str, cancel_response: bool
+) -> None:
+    service, thread = _service(never_finish=True)
+    service.cancel_release.clear()
+    if trigger == "protocol-error":
+        service.status_override = (200, {"status": "running"})
+    harness = TemplarHarness(
+        endpoint=f"http://127.0.0.1:{service.server_port}",
+        tasks=(TemplarTask(case="audit", workflow="source_security_audit", input={}),),
+        poll_seconds=0.01,
+        request_timeout_seconds=0.2,
+    )
+    key = TrialKey(campaign="cleanup", revision="1", case="audit", variant="only", sample=1)
+    trace = LocalTrace(key, 1, tmp_path / "events.jsonl")
+
+    async def exercise() -> None:
+        trial = Trial(key=key, attempt=1, seed=1, directory=tmp_path)
+        case = Case(name="audit", task="Audit", required_checks=("templar.verified",))
+        task = asyncio.create_task(harness.run(case, trial, trace))
+        try:
+            async with asyncio.timeout(3):
+                while service.inspections == 0 and not service.cancel_started.is_set():
+                    await asyncio.sleep(0.01)
+                if trigger == "cancellation":
+                    task.cancel()
+                while not service.cancel_started.is_set():
+                    await asyncio.sleep(0.01)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+                assert not task.done(), "Templar released its HTTP client during remote cleanup"
+            if cancel_response:
+                service.cancel_release.set()
+            expected = asyncio.CancelledError if trigger == "cancellation" else HarnessError
+            async with asyncio.timeout(3):
+                with pytest.raises(expected):
+                    await task
+            state = json.loads((tmp_path / "templar-state.json").read_text())
+            if cancel_response:
+                assert state["phase"] == "cancelled", state
+                assert state["status"] == "interrupted"
+            else:
+                assert state["phase"] == "cancellation-unconfirmed", state
+                assert state["cancel_error"]
+        finally:
+            service.cancel_release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        trace.close()
+        service.shutdown()
+        thread.join()
 
 
 @pytest.mark.parametrize("publish_on_accept", [False, True], ids=["paginated", "late-events"])
@@ -330,6 +401,9 @@ def _service(
     service.status_override = None
     service.submission_override = None
     service.cancel_status = 200
+    service.cancel_started = threading.Event()
+    service.cancel_release = threading.Event()
+    service.cancel_release.set()
     service.ready = threading.Event()
     thread = threading.Thread(
         target=service.serve_forever,

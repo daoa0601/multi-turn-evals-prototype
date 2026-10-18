@@ -8,11 +8,14 @@ import json
 import os
 import sys
 import time
-from collections.abc import Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.parse import urlsplit
+from uuid import UUID, uuid5
 
 from pydantic_multiturn_evals.harnesses._process import (
     ProcessOutputLimitError,
@@ -103,22 +106,44 @@ _LANGFUSE_ENVIRONMENT = (
 class LangfuseExporter:
     """Run the synchronous Langfuse SDK in a killable child process."""
 
-    def __init__(self, *, inherit_environment: tuple[str, ...]) -> None:
+    def __init__(
+        self, *, inherit_environment: tuple[str, ...], base_url: str, project_id: str
+    ) -> None:
+        destination = urlsplit(base_url)
+        if (
+            destination.scheme not in {"http", "https"}
+            or not destination.hostname
+            or destination.username is not None
+            or destination.password is not None
+            or destination.query
+            or destination.fragment
+        ):
+            raise ValueError(
+                "Langfuse base URL must be HTTP(S) without credentials, query or fragment"
+            )
+        if not project_id.strip():
+            raise ValueError("Langfuse export requires a non-secret project ID")
         self._inherit_environment = inherit_environment
+        self._base_url = base_url.rstrip("/")
+        self._project_id = project_id
 
     @property
     def component(self) -> ComponentDefinition:
         return ComponentDefinition(
             kind="langfuse",
-            version="3",
-            config={"inherit_environment": list(self._inherit_environment)},
+            version="4",
+            config={
+                "inherit_environment": list(self._inherit_environment),
+                "base_url": self._base_url,
+                "project_id": self._project_id,
+            },
         )
 
     @classmethod
     def from_environment(cls) -> LangfuseExporter:
         missing = [
             name
-            for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+            for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_PROJECT_ID")
             if not os.environ.get(name)
         ]
         if missing:
@@ -126,7 +151,15 @@ class LangfuseExporter:
         if importlib.util.find_spec("langfuse") is None:
             raise RuntimeError("Langfuse export requires: uv sync --extra tracing")
         inherited = tuple(name for name in _LANGFUSE_ENVIRONMENT if name in os.environ)
-        return cls(inherit_environment=inherited)
+        return cls(
+            inherit_environment=inherited,
+            base_url=(
+                os.environ.get("LANGFUSE_BASE_URL")
+                or os.environ.get("LANGFUSE_HOST")
+                or "https://cloud.langfuse.com"
+            ),
+            project_id=os.environ["LANGFUSE_PROJECT_ID"],
+        )
 
     async def export(
         self,
@@ -140,6 +173,7 @@ class LangfuseExporter:
             "events": [event.model_dump(mode="json") for event in events],
             "result": result.model_dump(mode="json"),
             "export_id": export_id,
+            "base_url": self._base_url,
         }
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -188,7 +222,9 @@ class _LangfuseObservation(Protocol):
 
     def update(self, **values: object) -> None: ...
 
-    def score_trace(self, *, name: str, value: float, comment: str | None = None) -> None: ...
+    def score_trace(
+        self, *, name: str, value: float, score_id: str, comment: str | None = None
+    ) -> None: ...
 
 
 class _LangfuseClient(Protocol):
@@ -206,6 +242,12 @@ class _LangfuseClient(Protocol):
     def flush(self) -> None: ...
 
 
+# The worker's SDK ID generator reads this context when each observation starts.
+LANGFUSE_OBSERVATION_ID: ContextVar[int | None] = ContextVar(
+    "langfuse_observation_id", default=None
+)
+
+
 def export_with_langfuse_client(
     client_value: object,
     key: TrialKey,
@@ -216,36 +258,63 @@ def export_with_langfuse_client(
     client = cast("_LangfuseClient", client_value)
     metadata: dict[str, object] = key.model_dump(mode="json")
     metadata["attempt"] = result.attempt
-    with client.start_as_current_observation(
-        name="multiturn-eval-trial",
-        as_type="evaluator",
-        input={"key": metadata},
-        metadata=metadata,
-        trace_context={"trace_id": export_id},
-        version=key.revision,
-    ) as root:
+    with (
+        _observation_identity(export_id, "trial"),
+        client.start_as_current_observation(
+            name="multiturn-eval-trial",
+            as_type="evaluator",
+            input={"key": metadata},
+            metadata=metadata,
+            trace_context={"trace_id": export_id},
+            version=key.revision,
+        ) as root,
+    ):
         for event in events:
-            _export_event(root, event)
+            with _observation_identity(export_id, f"event:{event.sequence}"):
+                _export_event(root, event)
         root.update(output=result.model_dump(mode="json"))
         if isinstance(result.terminal, Completed):
             for judgment in result.terminal.judgments:
                 root.score_trace(
                     name=judgment.criterion,
+                    score_id=f"{export_id}:judgment:{judgment.criterion}",
                     value=(
                         judgment.score if judgment.score is not None else float(judgment.passed)
                     ),
                     comment=judgment.reason,
                 )
-            root.score_trace(name="trial_passed", value=float(result.terminal.passed))
+            root.score_trace(
+                name="trial_passed",
+                value=float(result.terminal.passed),
+                score_id=f"{export_id}:trial-passed",
+            )
         elif isinstance(result.terminal, Failed):
             root.score_trace(
                 name="trial_completed",
+                score_id=f"{export_id}:trial-completed",
                 value=0.0,
                 comment=result.terminal.failure.message,
             )
         elif isinstance(result.terminal, Interrupted):
-            root.score_trace(name="trial_completed", value=0.0, comment=result.terminal.reason)
+            root.score_trace(
+                name="trial_completed",
+                value=0.0,
+                score_id=f"{export_id}:trial-completed",
+                comment=result.terminal.reason,
+            )
     client.flush()
+
+
+@contextmanager
+def _observation_identity(export_id: str, identity: str) -> Iterator[None]:
+    # OpenTelemetry span IDs are nonzero 64-bit integers. Event sequences are durable
+    # within an export, so retries address the same observations at the collector.
+    identifier = uuid5(UUID(export_id), identity).int & ((1 << 64) - 1)
+    token = LANGFUSE_OBSERVATION_ID.set(identifier or 1)
+    try:
+        yield
+    finally:
+        LANGFUSE_OBSERVATION_ID.reset(token)
 
 
 def _export_event(root: _LangfuseObservation, event: TraceEvent) -> None:

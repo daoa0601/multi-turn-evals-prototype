@@ -327,6 +327,102 @@ time.sleep(60)
     assert (containers / "sweb.eval.owner__repo.name-1.another-run").exists()
 
 
+@pytest.mark.parametrize(
+    "exit_code, report_kind, phase",
+    [
+        (2, "missing", "verify"),
+        (2, "valid", None),
+        (0, "missing", "verify"),
+        (0, "malformed", "verify"),
+        (0, "no-resolved", "protocol"),
+        (0, "invalid-resolved", "protocol"),
+        (0, "duplicate", "protocol"),
+    ],
+)
+def test_swebench_cleans_up_after_abnormal_exit_or_unusable_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    report_kind: str,
+    phase: str | None,
+) -> None:
+    container = tmp_path / "container"
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("TEST_CONTAINER", str(container))
+    _executable(
+        tmp_path / "docker",
+        """
+import os, pathlib, sys
+container = pathlib.Path(os.environ['TEST_CONTAINER'])
+args = sys.argv[1:]
+if args[0] == 'ps':
+    print(container.read_text())
+elif args[:2] == ['rm', '--force']:
+    assert args[2:] == [container.read_text()]
+    container.unlink()
+else:
+    raise SystemExit('unexpected Docker command: ' + str(args))
+""",
+    )
+    evaluator = _executable(
+        tmp_path / "evaluator.py",
+        f"""
+import json, os, pathlib, sys
+args = sys.argv[1:]
+run_id = args[args.index('--run-id') + 1]
+instance = args[args.index('--instance') + 1]
+pathlib.Path(os.environ['TEST_CONTAINER']).write_text('sweb.eval.' + instance + '.' + run_id)
+root = pathlib.Path('logs/run_evaluation') / run_id / 'gold' / instance
+root.mkdir(parents=True)
+kind = {report_kind!r}
+value = {{instance: {{'resolved': False}}}}
+if kind == 'no-resolved':
+    value = {{instance: {{}}}}
+elif kind == 'invalid-resolved':
+    value = {{instance: {{'resolved': 'unknown'}}}}
+if kind != 'missing':
+    (root / 'report.json').write_text('{{' if kind == 'malformed' else json.dumps(value))
+if kind == 'duplicate':
+    (root / 'duplicate').mkdir()
+    (root / 'duplicate' / 'report.json').write_text(json.dumps(value))
+raise SystemExit({exit_code})
+""",
+    )
+    campaign = Campaign(
+        name="swebench-abnormal-exit",
+        revision="1",
+        cases=(Case(name="repair", task="Repair", required_checks=("swebench.resolved",)),),
+        variants=(
+            Variant(
+                name="only",
+                harness=SweBenchHarness(
+                    evaluator_argv=(str(evaluator),),
+                    evaluator_environment=("PATH", "TEST_CONTAINER"),
+                    package_version="5.0.2-boundary",
+                    tasks=(
+                        SweBenchTask(
+                            case="repair", dataset="verified", instance="repo-1", revision="1"
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path / "run"))
+
+    terminal = report.results[0].terminal
+    if phase is None:
+        assert isinstance(terminal, Completed)
+        assert terminal.evidence.checks[0].passed is False
+    else:
+        assert isinstance(terminal, Failed)
+        assert terminal.failure.phase == phase
+    assert not container.exists(), "SWE-bench left its verifier container allocated"
+    cleanup = json.loads(next(tmp_path.glob("run/trials/**/swebench-cleanup.json")).read_text())
+    assert cleanup["status"] == "completed", cleanup
+
+
 def _executable(path: Path, body: str) -> Path:
     path.write_text(f"#!{sys.executable}\n" + body, encoding="utf-8")
     path.chmod(0o755)

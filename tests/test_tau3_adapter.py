@@ -21,13 +21,15 @@ from pydantic_multiturn_evals.model import JsonValue, TraceEvent
 
 
 @pytest.mark.parametrize("has_usage", [True, False])
+@pytest.mark.parametrize("has_duration", [True, False])
 def test_tau3_adapter_uses_the_official_reward_and_imports_the_trajectory(
-    tmp_path: Path, has_usage: bool
+    tmp_path: Path, has_usage: bool, has_duration: bool
 ) -> None:
     worker = tmp_path / "tau3_worker.py"
     worker.write_text(
         f"#!{sys.executable}\n"
         + f"has_usage = {has_usage!r}\n"
+        + f"has_duration = {has_duration!r}\n"
         + """
 import json, pathlib, sys
 request = json.loads(sys.stdin.readline())
@@ -80,7 +82,8 @@ results.write_text(json.dumps({
                 'content': 'Please update my account.',
                 'cost': 0.001,
                 'usage': {'prompt_tokens': 10, 'completion_tokens': 4} if has_usage else None,
-                'generation_time_seconds': 0.1,
+                'raw_data': None if has_usage else {'id': 'user-1'},
+                **({'generation_time_seconds': 0.1} if has_duration else {}),
             },
             {
                 'role': 'assistant',
@@ -91,7 +94,8 @@ results.write_text(json.dumps({
                 }],
                 'cost': 0.002,
                 'usage': {'prompt_tokens': 20, 'completion_tokens': 5} if has_usage else None,
-                'generation_time_seconds': 0.2,
+                'raw_data': None if has_usage else {'id': 'agent-1'},
+                **({'generation_time_seconds': 0.2} if has_duration else {}),
             },
             {
                 'role': 'tool',
@@ -103,14 +107,16 @@ results.write_text(json.dumps({
                 'content': 'The account was not updated.',
                 'cost': 0.001,
                 'usage': {'prompt_tokens': 30, 'completion_tokens': 6} if has_usage else None,
-                'generation_time_seconds': 0.3,
+                'raw_data': None if has_usage else {'id': 'agent-2'},
+                **({'generation_time_seconds': 0.3} if has_duration else {}),
             },
             {
                 'role': 'user',
                 'content': '###STOP###',
                 'cost': 0.001,
                 'usage': {'prompt_tokens': 40, 'completion_tokens': 2} if has_usage else None,
-                'generation_time_seconds': 0.1,
+                'raw_data': None if has_usage else {'id': 'user-2'},
+                **({'generation_time_seconds': 0.0} if has_duration else {}),
             },
         ],
     }],
@@ -176,6 +182,9 @@ print('ordinary tau3 console output')
         "user",
     ]
     assert [call.role for call in result.model_calls] == ["actor", "target", "target", "actor"]
+    assert [call.duration_seconds for call in result.model_calls] == (
+        [0.1, 0.2, 0.3, 0.0] if has_duration else [None, None, None, None]
+    )
     usages = [call.usage for call in result.model_calls]
     assert all(usage is not None for usage in usages)
     if has_usage:

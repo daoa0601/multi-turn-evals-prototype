@@ -375,7 +375,7 @@ def _usage(metrics: _AtifMetrics, *, tool_calls: int) -> ModelUsage | None:
         requests=1,
         tool_calls=tool_calls,
         input_tokens=input_tokens,
-        cache_read_tokens=metrics.cached_tokens if metrics.cached_tokens is not None else 0,
+        cache_read_tokens=metrics.cached_tokens,
         output_tokens=output_tokens,
         cost_usd=_valid_cost(metrics.cost_usd),
     )

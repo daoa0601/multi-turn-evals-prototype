@@ -214,11 +214,11 @@ class TemplarHarness:
                 )
             except asyncio.CancelledError:
                 if run_id is not None:
-                    await asyncio.shield(self._cancel(client, run_id, state, state_path))
+                    await self._cancel(client, run_id, state, state_path)
                 raise
             except Exception as error:
                 if run_id is not None:
-                    await asyncio.shield(self._cancel(client, run_id, state, state_path))
+                    await self._cancel(client, run_id, state, state_path)
                 if isinstance(error, HarnessError):
                     raise
                 raise HarnessError("protocol", f"invalid Templar response: {error}") from error
@@ -267,6 +267,22 @@ class TemplarHarness:
             await asyncio.sleep(self.poll_seconds)
 
     async def _cancel(
+        self,
+        client: httpx.AsyncClient,
+        run_id: str,
+        state: dict[str, JsonValue],
+        state_path: Path,
+    ) -> None:
+        pending = asyncio.create_task(self._request_cancellation(client, run_id, state, state_path))
+        # Keep the client open until the bounded cancellation request finishes.
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                continue
+        pending.result()
+
+    async def _request_cancellation(
         self,
         client: httpx.AsyncClient,
         run_id: str,
