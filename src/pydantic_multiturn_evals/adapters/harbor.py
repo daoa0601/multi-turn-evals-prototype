@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import re
+import signal
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -275,6 +276,7 @@ class HarborHarness:
                     stdout_bytes=self.output_bytes,
                     stderr_bytes=self.stderr_bytes,
                     cancel_grace_seconds=self.cancel_grace_seconds,
+                    error_signal=signal.SIGINT,
                 )
         except TimeoutError as error:
             raise HarnessError(

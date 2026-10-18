@@ -9,6 +9,7 @@ import pytest
 from pydantic_multiturn_evals import (
     Campaign,
     Case,
+    Completed,
     ComponentDefinition,
     Failed,
     Message,
@@ -19,6 +20,7 @@ from pydantic_multiturn_evals import (
     TrialBudget,
     TrialKey,
     Variant,
+    read_report,
     run,
 )
 from pydantic_multiturn_evals.evaluation import HarnessError
@@ -143,6 +145,48 @@ def test_cleanup_failure_keeps_evidence_produced_while_target_was_open(tmp_path:
     assert caught.value.phase == "cleanup"
     assert caught.value.evidence is not None
     assert caught.value.evidence.checks[0].name == "state"
+
+
+@pytest.mark.parametrize("phase", ["start", "execute"])
+def test_empty_target_errors_are_recorded_and_other_trials_continue(
+    tmp_path: Path, phase: str
+) -> None:
+    class TimeoutSession(RecordingSession):
+        async def send(self, message: Message) -> tuple[Message, ...]:
+            raise TimeoutError()
+
+    class TimeoutTarget(RecordingTarget):
+        async def open(self, trial: Trial, trace: TraceRecorder) -> TargetSession:
+            if trial.key.sample == 1:
+                if phase == "start":
+                    raise TimeoutError()
+                return TimeoutSession()
+            return await super().open(trial, trace)
+
+    campaign = Campaign(
+        name="empty-error",
+        revision="1",
+        cases=(Case(name="case", task="Help me", required_checks=("state",)),),
+        variants=(
+            Variant(
+                name="only",
+                harness=ConversationHarness(target=TimeoutTarget(), actor=AdaptiveActor()),
+            ),
+        ),
+        samples=2,
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path, workers=1))
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert terminal.failure.phase == phase
+    assert terminal.failure.message.strip()
+    assert terminal.failure.exception_type == "TimeoutError"
+    assert isinstance(report.results[1].terminal, Completed)
+    assert read_report(tmp_path).results[0].terminal == terminal
+    resumed = asyncio.run(run(campaign, directory=tmp_path))
+    assert resumed.executed_trials == 0
 
 
 @pytest.mark.parametrize("cancel_campaign", [False, True])

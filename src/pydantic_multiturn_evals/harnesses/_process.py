@@ -44,6 +44,7 @@ async def collect_process_output(
     stdout_bytes: int,
     stderr_bytes: int,
     cancel_grace_seconds: float = 2,
+    error_signal: signal.Signals = signal.SIGTERM,
 ) -> tuple[bytes, bytes]:
     stdin = process.stdin
     stdout = process.stdout
@@ -52,29 +53,65 @@ async def collect_process_output(
         raise RuntimeError("command has no process pipe")
     stdout_task = asyncio.create_task(_read_at_most(stdout, stdout_bytes, "stdout"))
     stderr_task = asyncio.create_task(_read_at_most(stderr, stderr_bytes, "stderr"))
+    write_task = asyncio.create_task(_write_request(stdin, request))
     exit_task = asyncio.create_task(_finish_process_group(process))
     try:
-        try:
-            stdin.write(request)
-            await stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            # A command may exit without reading its request; its output and exit code still decide.
-            pass
-        stdin.close()
-        output, error_output, _ = await asyncio.gather(stdout_task, stderr_task, exit_task)
+        output, error_output, _, _ = await asyncio.gather(
+            stdout_task, stderr_task, write_task, exit_task
+        )
         return output, error_output
     except BaseException as error:
-        exit_task.cancel()
-        first_signal = (
-            signal.SIGINT if isinstance(error, asyncio.CancelledError) else signal.SIGTERM
-        )
-        try:
-            await asyncio.shield(stop_process_group(process, first_signal, cancel_grace_seconds))
-        finally:
-            for task in (stdout_task, stderr_task):
+        first_signal = signal.SIGINT if isinstance(error, asyncio.CancelledError) else error_signal
+
+        async def cleanup() -> None:
+            tasks = (stdout_task, stderr_task, write_task, exit_task)
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(stdout_task, stderr_task, exit_task, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await _stop_after_failure(process, stdout, stderr, first_signal, cancel_grace_seconds)
+
+        pending = asyncio.create_task(cleanup())
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                continue
+        pending.result()
         raise
+
+
+async def _write_request(stdin: asyncio.StreamWriter, request: bytes) -> None:
+    try:
+        stdin.write(request)
+        await stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        # A command may exit without reading its request; its output and exit code still decide.
+        pass
+    finally:
+        stdin.close()
+
+
+async def _stop_after_failure(
+    process: asyncio.subprocess.Process,
+    stdout: asyncio.StreamReader,
+    stderr: asyncio.StreamReader,
+    first_signal: signal.Signals,
+    grace_seconds: float,
+) -> None:
+    # A reader that hit its limit stops consuming. Drain without retaining output so
+    # full pipes cannot block cooperative cleanup or Process.wait() after a kill.
+    readers = [asyncio.create_task(_discard_output(stream)) for stream in (stdout, stderr)]
+    try:
+        await stop_process_group(process, first_signal, grace_seconds)
+    finally:
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+
+
+async def _discard_output(stream: asyncio.StreamReader) -> None:
+    while await stream.read(65_536):
+        pass
 
 
 async def _finish_process_group(process: asyncio.subprocess.Process) -> None:

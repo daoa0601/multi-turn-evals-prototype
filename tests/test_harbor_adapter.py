@@ -102,6 +102,56 @@ trial.mkdir(parents=True)
     }
 
 
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_harbor_output_limits_allow_environment_cleanup(tmp_path: Path, stream: str) -> None:
+    executable = _cli(
+        tmp_path,
+        "harbor_output.py",
+        f"""
+import asyncio, os, pathlib, sys
+
+async def main():
+    root = pathlib.Path(os.environ['MTE_TRIAL_DIRECTORY'])
+    try:
+        sys.{stream}.write('x' * 2_000_000)
+        sys.{stream}.flush()
+        await asyncio.Event().wait()
+    finally:
+        await asyncio.sleep(0.05)
+        (root / 'environment-stopped').write_text('stopped')
+
+asyncio.run(main())
+""",
+    )
+    campaign = Campaign(
+        name="harbor-output-cleanup",
+        revision="1",
+        cases=(Case(name="case", task="Run", required_checks=("harbor.verified",)),),
+        variants=(
+            Variant(
+                name="only",
+                harness=HarborHarness(
+                    executable=executable,
+                    harbor_version="test-boundary",
+                    tasks=(HarborLocalTask(case="case", path=tmp_path, revision="1"),),
+                    cancel_grace_seconds=1,
+                    output_bytes=1000,
+                    stderr_bytes=1000,
+                ),
+            ),
+        ),
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path / "run"))
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert terminal.failure.phase == "protocol"
+    assert f"{stream} exceeds 1000 bytes" in terminal.failure.message
+    stopped = list((tmp_path / "run").glob("trials/**/environment-stopped"))
+    assert stopped, "Harbor returned before its environment cleanup finished"
+
+
 def test_harbor_dataset_binding_runs_one_task_without_prelisting_the_dataset(
     tmp_path: Path,
 ) -> None:

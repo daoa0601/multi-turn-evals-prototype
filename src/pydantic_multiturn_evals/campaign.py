@@ -337,11 +337,12 @@ async def _run_trial(
             evidence=evidence,
         )
     except HarnessError as error:
+        cause = error.__cause__ or error
         terminal = Failed(
             failure=Failure(
                 phase=error.phase,
-                message=str(error),
-                exception_type=type(error.__cause__ or error).__name__,
+                message=str(error) or f"harness {error.phase} failed ({type(cause).__name__})",
+                exception_type=type(cause).__name__,
             ),
             evidence=error.evidence,
         )

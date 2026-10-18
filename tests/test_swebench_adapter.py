@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from pydantic_multiturn_evals import Campaign, Case, Completed, Failed, Variant, run
+from pydantic_multiturn_evals import (
+    Campaign,
+    Case,
+    Completed,
+    Failed,
+    ResourceClaim,
+    TrialBudget,
+    Variant,
+    run,
+)
 from pydantic_multiturn_evals.adapters import SweBenchHarness, SweBenchTask
 
 
@@ -139,6 +150,181 @@ if {verifier_report!r}:
         assert isinstance(terminal, Failed)
         assert terminal.failure.phase == "verify"
         assert "without an instance report" in terminal.failure.message
+
+
+def test_swebench_native_ids_isolate_concurrent_trials_and_output_roots(tmp_path: Path) -> None:
+    evaluator = _executable(
+        tmp_path / "evaluator.py",
+        """
+import json, pathlib, sys
+args = sys.argv[1:]
+run_id = args[args.index('--run-id') + 1]
+instance = args[args.index('--instance') + 1]
+root = pathlib.Path('logs/run_evaluation') / run_id / 'gold' / instance
+root.mkdir(parents=True)
+(root / 'report.json').write_text(json.dumps({instance: {'resolved': True}}))
+""",
+    )
+    harness = SweBenchHarness(
+        evaluator_argv=(str(evaluator),),
+        package_version="5.0.2-boundary",
+        tasks=tuple(
+            SweBenchTask(case=case, dataset="verified", instance="owner__repo-1", revision="1")
+            for case in ("repair-one", "repair")
+        ),
+    )
+    campaign = Campaign(
+        name="native-ids",
+        revision="1",
+        cases=tuple(
+            Case(name=case, task="Repair", required_checks=("swebench.resolved",))
+            for case in ("repair-one", "repair")
+        ),
+        variants=tuple(
+            Variant(name=name, harness=harness) for name in ("baseline", "one-baseline")
+        ),
+    )
+
+    async def exercise() -> None:
+        reports = await asyncio.gather(
+            run(campaign, directory=tmp_path / "first"),
+            run(campaign, directory=tmp_path / "second"),
+        )
+        assert all(report.exit_code == 0 for report in reports)
+
+    asyncio.run(exercise())
+
+    states = list(tmp_path.glob("*/trials/**/swebench-state.json"))
+    run_ids = [json.loads(path.read_text())["run_id"] for path in states]
+    assert len(run_ids) == 8
+    assert len(set(run_ids)) == 8, "independent SWE-bench attempts share native container names"
+    for path in states:
+        state = json.loads(path.read_text())
+        reports = list(path.parent.glob(f"*/logs/run_evaluation/{state['run_id']}/**/report.json"))
+        assert len(reports) == 1, f"persisted native run ID does not locate its report: {path}"
+
+
+@pytest.mark.parametrize("cancel_campaign", [False, True], ids=["deadline", "cancellation"])
+@pytest.mark.parametrize("docker_behavior", ["remove", "hang", "error"])
+def test_swebench_removes_only_its_own_verifier_containers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_campaign: bool,
+    docker_behavior: str,
+) -> None:
+    containers = tmp_path / "containers"
+    containers.mkdir()
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("TEST_CONTAINERS", str(containers))
+    _executable(
+        tmp_path / "docker",
+        f"""
+import os, pathlib, re, sys, time
+root = pathlib.Path(os.environ['TEST_CONTAINERS'])
+args = sys.argv[1:]
+if {docker_behavior!r} == 'hang':
+    (root.parent / 'cleanup-pid').write_text(str(os.getpid()))
+    time.sleep(60)
+if {docker_behavior!r} == 'error':
+    raise SystemExit(1)
+if args[0] == 'ps':
+    pattern = args[args.index('--filter') + 1].removeprefix('name=')
+    for path in root.iterdir():
+        if re.search(pattern, '/' + path.name):
+            print(path.name)
+elif args[:2] == ['rm', '--force']:
+    for name in args[2:]:
+        (root / name).unlink()
+else:
+    raise SystemExit('unexpected Docker command: ' + str(args))
+""",
+    )
+    evaluator = _executable(
+        tmp_path / "evaluator.py",
+        """
+import os, pathlib, signal, sys, time
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+args = sys.argv[1:]
+run_id = args[args.index('--run-id') + 1]
+instance = args[args.index('--instance') + 1].lower()
+root = pathlib.Path(os.environ['TEST_CONTAINERS'])
+name = 'sweb.eval.' + instance + '.' + run_id
+for suffix in ('', '.1234567890', '.other', '-other'):
+    (root / (name + suffix)).write_text('allocated')
+(root / ('sweb.eval.' + instance + '.another-run')).write_text('another trial')
+pathlib.Path('ready').write_text('ready')
+time.sleep(60)
+""",
+    )
+    harness = SweBenchHarness(
+        evaluator_argv=(str(evaluator),),
+        evaluator_environment=("PATH", "TEST_CONTAINERS"),
+        package_version="5.0.2-boundary",
+        cleanup_timeout_seconds=0.5 if docker_behavior == "hang" else 2,
+        tasks=(
+            SweBenchTask(
+                case="repair", dataset="verified", instance="Owner__Repo.name-1", revision="1"
+            ),
+        ),
+    )
+    campaign = Campaign(
+        name="swebench-cleanup",
+        revision="1",
+        cases=(
+            Case(
+                name="repair",
+                task="Repair",
+                required_checks=("swebench.resolved",),
+                budget=TrialBudget(seconds=30 if cancel_campaign else 0.5),
+            ),
+        ),
+        variants=(
+            Variant(name="only", harness=harness, resources=(ResourceClaim(name="docker"),)),
+        ),
+    )
+    directory = tmp_path / "run"
+
+    async def exercise() -> None:
+        task = asyncio.create_task(run(campaign, directory=directory, capacities={"docker": 1}))
+        try:
+            async with asyncio.timeout(5):
+                while not list(directory.glob("trials/**/ready")):
+                    await asyncio.sleep(0.01)
+            if cancel_campaign:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                report = await task
+                terminal = report.results[0].terminal
+                assert isinstance(terminal, Failed)
+                assert terminal.failure.phase == "timeout"
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    started = time.monotonic()
+    asyncio.run(exercise())
+    assert time.monotonic() - started < 6, "Docker cleanup exceeded its bounded window"
+
+    state = json.loads(next(directory.glob("trials/**/swebench-state.json")).read_text())
+    cleanup = json.loads(next(directory.glob("trials/**/swebench-cleanup.json")).read_text())
+    name = f"sweb.eval.owner__repo.name-1.{state['run_id']}"
+    if docker_behavior == "remove":
+        assert cleanup["status"] == "completed", cleanup
+        assert not (containers / name).exists(), "cancelled attempt's verifier container survived"
+        assert not (containers / (name + ".1234567890")).exists()
+    else:
+        assert cleanup["status"] == "failed"
+        assert cleanup["message"]
+        if docker_behavior == "hang":
+            pid = int((tmp_path / "cleanup-pid").read_text())
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+    assert (containers / (name + ".other")).exists(), "cleanup removed another trial's container"
+    assert (containers / (name + "-other")).exists()
+    assert (containers / "sweb.eval.owner__repo.name-1.another-run").exists()
 
 
 def _executable(path: Path, body: str) -> Path:

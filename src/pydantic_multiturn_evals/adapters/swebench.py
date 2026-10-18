@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import JsonValue
 
@@ -60,6 +63,7 @@ class SweBenchHarness:
     check: str = "swebench.resolved"
     solver_timeout_seconds: float = 900
     verifier_timeout_seconds: float = 1800
+    cleanup_timeout_seconds: float = 10
     output_bytes: int = 8_000_000
     stderr_bytes: int = 2_000_000
     solver_environment: tuple[str, ...] = ()
@@ -79,6 +83,8 @@ class SweBenchHarness:
             raise ValueError("SWE-bench external solver needs a semantic revision")
         if self.solver_timeout_seconds <= 0 or self.verifier_timeout_seconds <= 0:
             raise ValueError("SWE-bench timeouts must be positive")
+        if self.cleanup_timeout_seconds <= 0:
+            raise ValueError("SWE-bench cleanup timeout must be positive")
         if self.output_bytes < 1 or self.stderr_bytes < 1:
             raise ValueError("SWE-bench output limits must be positive")
 
@@ -95,6 +101,7 @@ class SweBenchHarness:
                 "check": self.check,
                 "solver_timeout_seconds": self.solver_timeout_seconds,
                 "verifier_timeout_seconds": self.verifier_timeout_seconds,
+                "cleanup_timeout_seconds": self.cleanup_timeout_seconds,
                 "output_bytes": self.output_bytes,
                 "stderr_bytes": self.stderr_bytes,
                 "solver_environment": list(self.solver_environment),
@@ -105,7 +112,7 @@ class SweBenchHarness:
     async def run(self, case: Case, trial: Trial, trace: TraceRecorder) -> Evidence:
         del trace
         task = self._task(case.name)
-        run_id = _run_id(trial)
+        run_id = f"mte-{uuid4().hex}"
         state_path = trial.directory / "swebench-state.json"
         _write_json(
             state_path,
@@ -260,16 +267,21 @@ class SweBenchHarness:
             str(summary),
         ]
         command.extend(("--gold",) if prediction is None else ("--predictions", str(prediction)))
-        stdout, stderr, returncode = await _command(
-            tuple(command),
-            cwd=directory,
-            environment=command_environment(self.evaluator_environment, directory),
-            request=b"",
-            timeout_seconds=self.verifier_timeout_seconds + 60,
-            output_bytes=self.output_bytes,
-            stderr_bytes=self.stderr_bytes,
-            label="SWE-bench verifier",
-        )
+        environment = command_environment(self.evaluator_environment, directory)
+        try:
+            stdout, stderr, returncode = await _command(
+                tuple(command),
+                cwd=directory,
+                environment=environment,
+                request=b"",
+                timeout_seconds=self.verifier_timeout_seconds + 60,
+                output_bytes=self.output_bytes,
+                stderr_bytes=self.stderr_bytes,
+                label="SWE-bench verifier",
+            )
+        except BaseException:
+            await self._cleanup_verifier(task.instance, run_id, directory, environment)
+            raise
         (directory / "swebench.stdout.txt").write_bytes(stdout)
         (directory / "swebench.stderr.txt").write_bytes(stderr)
         report = _find_instance_report(
@@ -289,6 +301,39 @@ class SweBenchHarness:
         if not isinstance(value, bool):
             raise HarnessError("protocol", f"SWE-bench report {report} has no boolean resolved")
         return report, value
+
+    async def _cleanup_verifier(
+        self,
+        instance: str,
+        run_id: str,
+        directory: Path,
+        environment: dict[str, str],
+    ) -> None:
+        async def cleanup() -> None:
+            status: dict[str, JsonValue]
+            try:
+                async with asyncio.timeout(self.cleanup_timeout_seconds):
+                    removed = await _remove_verifier_containers(instance, run_id, environment)
+                status = {"status": "completed", "removed": list(removed)}
+            except Exception as error:
+                status = {
+                    "status": "failed",
+                    "message": str(error) or type(error).__name__,
+                }
+            try:
+                _write_json(directory / "swebench-cleanup.json", status)
+            except OSError:
+                # An unwritable diagnostic must not replace the original verifier failure.
+                pass
+
+        pending = asyncio.create_task(cleanup())
+        # A second cancellation must not release the trial's slot before bounded cleanup finishes.
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                continue
+        pending.result()
 
     def _task(self, case: str) -> SweBenchTask:
         for task in self.tasks:
@@ -349,12 +394,38 @@ def _find_instance_report(root: Path, instance: str) -> Path | None:
     return found[0] if found else None
 
 
-def _run_id(trial: Trial) -> str:
-    key = trial.key
-    value = f"{key.campaign}-{key.revision}-{key.case}-{key.variant}-s{key.sample}-a{trial.attempt}"
-    if len(value) > 120:
-        raise HarnessError("prepare", "SWE-bench trial identity exceeds 120 characters")
-    return value
+async def _remove_verifier_containers(
+    instance: str, run_id: str, environment: dict[str, str]
+) -> tuple[str, ...]:
+    executable = shutil.which("docker", path=environment.get("PATH"))
+    if executable is None:
+        raise FileNotFoundError("Docker executable is unavailable for SWE-bench cleanup")
+
+    async def docker(*arguments: str) -> bytes:
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            *arguments,
+            env=environment,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        stdout, _ = await collect_process_output(
+            process, b"", stdout_bytes=65_536, stderr_bytes=65_536, cancel_grace_seconds=0
+        )
+        if process.returncode != 0:
+            raise RuntimeError(f"Docker cleanup exited with code {process.returncode}")
+        return stdout
+
+    # SWE-bench may append a timestamp after a Docker name conflict. Both names belong
+    # to this unique attempt; similar prefixes and other run IDs do not.
+    name = re.escape(f"sweb.eval.{instance.lower()}.{run_id}") + r"(\.[0-9]+)?"
+    stdout = await docker("ps", "--all", "--format", "{{.Names}}", "--filter", f"name=^/{name}$")
+    containers = tuple(item for item in stdout.decode().splitlines() if re.fullmatch(name, item))
+    if containers:
+        await docker("rm", "--force", *containers)
+    return containers
 
 
 def _verifier_artifacts(root: Path, directory: Path, report: Path) -> tuple[Artifact, ...]:

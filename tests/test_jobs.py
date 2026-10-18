@@ -164,6 +164,51 @@ def test_command_job_stops_reading_at_the_authored_output_limit(tmp_path: Path) 
     assert terminal.failure.message == "command job stdout exceeds 1000 bytes"
 
 
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_output_limits_interrupt_a_blocked_request_write(tmp_path: Path, stream: str) -> None:
+    code = f"""
+import os, pathlib, sys, time
+pathlib.Path(os.environ['MTE_TRIAL_DIRECTORY'], 'blocked-pid').write_text(str(os.getpid()))
+sys.{stream}.write('x' * 2_000_000)
+sys.{stream}.flush()
+time.sleep(60)
+"""
+    campaign = Campaign(
+        name="write-output-limit",
+        revision="1",
+        cases=(
+            Case(
+                name="job",
+                task="run",
+                data={"large": "x" * 2_000_000},
+                required_checks=("done",),
+            ),
+        ),
+        variants=(
+            Variant(
+                name="command",
+                harness=OneShotCommandHarness(
+                    argv=(sys.executable, "-c", code),
+                    cwd=tmp_path,
+                    timeout_seconds=1,
+                    output_bytes=1000,
+                    stderr_bytes=1000,
+                ),
+            ),
+        ),
+    )
+
+    report = asyncio.run(run(campaign, directory=tmp_path / "run"))
+
+    terminal = report.results[0].terminal
+    assert isinstance(terminal, Failed)
+    assert terminal.failure.phase == "protocol"
+    assert terminal.failure.message == f"command job {stream} exceeds 1000 bytes"
+    pid = int(next((tmp_path / "run").glob("trials/**/blocked-pid")).read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 @pytest.mark.parametrize("inherit_pipes", [False, True])
 def test_successful_job_reaps_background_descendants(tmp_path: Path, inherit_pipes: bool) -> None:
     code = """
